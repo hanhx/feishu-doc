@@ -41,7 +41,14 @@ http://localhost:9999/callback
 
 ## 二、本地配置
 
-编辑配置文件 `~/.codeium/windsurf/skills/feishu-doc/assets/.feishu`，填入应用凭证：
+复制模板文件并填入你的应用凭证：
+
+```bash
+cd ~/.codeium/windsurf/skills/feishu-doc
+cp assets/.feishu.example assets/.feishu
+```
+
+编辑 `assets/.feishu`，将 `cli_xxxx` 和 `xxxx` 替换为你的真实 App ID 和 App Secret：
 
 ```
 app_id=cli_xxxx
@@ -49,6 +56,8 @@ app_secret=xxxx
 ```
 
 仅需这两项，无需其他配置。
+
+> ⚠️ `assets/.feishu` 已被 `.gitignore` 忽略，不会被提交到仓库，你的凭证是安全的。
 
 ---
 
