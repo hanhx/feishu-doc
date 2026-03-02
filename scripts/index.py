@@ -8,9 +8,9 @@ import re
 import urllib.request
 import urllib.error
 
-import doc_actions as da
-import doc_blocks as db
-import targeted_ops as ops
+from fd_modules import doc_actions as da
+from fd_modules import doc_blocks as db
+from fd_modules import targeted_ops as ops
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FEISHU_FILE = os.path.join(SCRIPT_DIR, "..", "assets", ".feishu")
