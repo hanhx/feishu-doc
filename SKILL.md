@@ -43,6 +43,21 @@ python3 scripts/index.py write "<Feishu_URL>" "<content_file>"
 python3 scripts/index.py append "<Feishu_URL>" "<content_file>"
 ```
 
+**定点插入**（按标题/文本定位，支持模糊匹配和正则）：
+```bash
+python3 scripts/index.py insert-targeted "<Feishu_URL>" "<content_file>" \
+  --anchor-type heading --anchor "技术方案" --match fuzzy --position section_end
+```
+
+**删除章节**（先删子章节/内容，再删标题）：
+```bash
+python3 scripts/index.py delete-section "<Feishu_URL>" \
+  --anchor "技术方案" --match fuzzy
+```
+
+> ⚠️ `insert-targeted` 和 `delete-section` 默认都需要确认：会先输出预览，输入 `yes` 才执行。
+> 非交互场景请显式传 `--yes`。
+
 ## URL Format
 
 支持格式：
@@ -126,6 +141,29 @@ app_secret=xxxx
   "docUrl": "https://...",
   "action": "write",
   "blocksAdded": 5,
+  "status": "success"
+}
+```
+
+**定点插入（insert-targeted）**：
+```json
+{
+  "docUrl": "https://...",
+  "action": "insert-targeted",
+  "anchor": "技术方案",
+  "position": "section_end",
+  "blocksAdded": 3,
+  "status": "success"
+}
+```
+
+**删除章节（delete-section）**：
+```json
+{
+  "docUrl": "https://...",
+  "action": "delete-section",
+  "anchor": "技术方案",
+  "blocksDeleted": 8,
   "status": "success"
 }
 ```

@@ -8,6 +8,10 @@ import re
 import urllib.request
 import urllib.error
 
+import doc_actions as da
+import doc_blocks as db
+import targeted_ops as ops
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FEISHU_FILE = os.path.join(SCRIPT_DIR, "..", "assets", ".feishu")
 TOKEN_CACHE = os.path.join(SCRIPT_DIR, "..", "assets", ".token_cache")
@@ -16,11 +20,22 @@ API_BASE = "https://open.feishu.cn/open-apis"
 
 
 def usage():
-    print(f"用法: {sys.argv[0]} <action> <Feishu_URL> [content_file]")
+    print(f"用法: {sys.argv[0]} <action> <Feishu_URL> [content_file] [--options]")
     print()
-    print("  action       操作类型：read | write | append | clear")
+    print("  action       操作类型：read | write | append | clear | insert-targeted | delete-section")
     print("  Feishu_URL   飞书文档地址，如 https://xxx.feishu.cn/wiki/TOKEN")
-    print("  content_file 写入时的内容文件路径（write 模式必填）")
+    print("  content_file 写入时的内容文件路径（write/append/insert-targeted 模式必填）")
+    print()
+    print("定点插入：")
+    print(
+        "  python3 scripts/index.py insert-targeted <Feishu_URL> <content_file> "
+        "--anchor-type heading|text --anchor \"关键词\" --match fuzzy|regex --position after|section_end [--yes]"
+    )
+    print("  说明：默认先预览并要求输入 yes，传 --yes 可跳过交互确认")
+    print()
+    print("删除章节：")
+    print("  python3 scripts/index.py delete-section <Feishu_URL> --anchor \"章节名\" --match fuzzy|regex [--yes]")
+    print("  说明：先删子章节/内容，最后删标题；默认先预览并要求输入 yes")
     print()
     print("认证方式（优先级从高到低）：")
     print("  1. user_access_token：先运行 login.py 授权")
@@ -265,729 +280,260 @@ def check_resp(resp, action_name, auto_retry_login=False):
     return resp.get("data", {})
 
 
-def extract_text(elements):
-    if not elements:
-        return ""
-    parts = []
-    for el in elements:
-        if isinstance(el, dict):
-            tr = el.get("text_run") or {}
-            parts.append(tr.get("content", ""))
-            mr = el.get("mention_user") or el.get("mention_doc") or {}
-            if mr:
-                parts.append(mr.get("content", ""))
-    return "".join(parts)
-
-
-def extract_block_text(block):
-    for key in block:
-        if isinstance(block[key], dict) and "elements" in block[key]:
-            return extract_text(block[key].get("elements", []))
-    return ""
-
-
-def get_block_text_by_id(block_id, block_map, visited=None):
-    if visited is None:
-        visited = set()
-    if not block_id or block_id in visited:
-        return ""
-    visited.add(block_id)
-
-    block = block_map.get(block_id, {})
-    if not block:
-        return ""
-
-    # 优先取当前块文本；无文本时递归拼接子块文本
-    text = extract_block_text(block).strip()
-    if text:
-        return text
-
-    child_texts = []
-    for child_id in block.get("children", []) or []:
-        child_text = get_block_text_by_id(child_id, block_map, visited)
-        if child_text:
-            child_texts.append(child_text)
-    return "\n".join(child_texts)
-
-
-def collect_descendant_ids(block_id, block_map, visited=None):
-    if visited is None:
-        visited = set()
-    if not block_id or block_id in visited:
-        return set()
-    visited.add(block_id)
-
-    block = block_map.get(block_id, {})
-    descendants = set()
-    for child_id in block.get("children", []) or []:
-        descendants.add(child_id)
-        descendants.update(collect_descendant_ids(child_id, block_map, visited))
-    return descendants
-
-
-def table_block_to_md(block, block_map):
-    table = block.get("table", {})
-    prop = table.get("property", {}) if isinstance(table, dict) else {}
-
-    row_size = int(prop.get("row_size", 0) or 0)
-    col_size = int(prop.get("column_size", 0) or 0)
-    cell_ids = table.get("cells", []) if isinstance(table, dict) else []
-
-    if row_size <= 0 or col_size <= 0 or not cell_ids:
-        return "[表格]"
-
-    row_count = min(row_size, max(1, len(cell_ids) // col_size))
-    matrix = [["" for _ in range(col_size)] for _ in range(row_count)]
-
-    total_cells = min(len(cell_ids), row_count * col_size)
-    for idx in range(total_cells):
-        r = idx // col_size
-        c = idx % col_size
-        text = get_block_text_by_id(cell_ids[idx], block_map).strip()
-        text = text.replace("\n", "<br>").replace("|", "\\|")
-        matrix[r][c] = text
-
-    if not matrix:
-        return "[表格]"
-
-    header = matrix[0]
-    separator = ["---"] * col_size
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| " + " | ".join(separator) + " |",
-    ]
-    for row in matrix[1:]:
-        lines.append("| " + " | ".join(row) + " |")
-    return "\n".join(lines)
-
-
-def callout_block_to_md(block, block_map):
-    texts = []
-
-    # 优先从子块读取（避免与 elements 重复）
-    children = block.get("children", []) or []
-    if children:
-        for child_id in children:
-            child_text = get_block_text_by_id(child_id, block_map).strip()
-            if child_text:
-                texts.append(child_text)
-    else:
-        # 无子块时才从 callout.elements 读取
-        callout = block.get("callout", {})
-        if isinstance(callout, dict) and callout.get("elements"):
-            direct = extract_text(callout.get("elements", [])).strip()
-            if direct:
-                texts.append(direct)
-
-    if not texts:
-        return None
-
-    merged = "\n".join(texts)
-    return "\n".join([f"> {ln}" if ln else ">" for ln in merged.split("\n")])
-
-
-def block_to_md(block, block_map=None):
-    btype = block.get("block_type", 0)
-    if btype == 1:  # page
-        page = block.get("page", {})
-        return "# " + extract_text(page.get("elements", []))
-    elif btype == 2:  # text
-        return extract_text(block.get("text", {}).get("elements", []))
-    elif btype in range(3, 12):  # heading 1-9
-        level = btype - 2
-        key = f"heading{level}"
-        return "#" * level + " " + extract_text(block.get(key, {}).get("elements", []))
-    elif btype == 12:  # bullet
-        return "- " + extract_text(block.get("bullet", {}).get("elements", []))
-    elif btype == 13:  # ordered
-        return "1. " + extract_text(block.get("ordered", {}).get("elements", []))
-    elif btype == 14:  # code
-        code = block.get("code", {})
-        lang_map = {
-            0: "PlainText", 1: "ABAP", 2: "Ada", 3: "Apache", 4: "Apex", 5: "Assembly",
-            6: "Bash", 7: "CSharp", 8: "CPP", 9: "C", 10: "COBOL", 11: "CSS", 12: "CoffeeScript",
-            13: "D", 14: "Dart", 15: "Delphi", 16: "Django", 17: "Dockerfile", 18: "Erlang",
-            19: "Fortran", 20: "FoxPro", 21: "Go", 22: "Groovy", 23: "HTML", 24: "HTMLBars",
-            25: "HTTP", 26: "Haskell", 27: "JSON", 28: "Java", 29: "JavaScript", 30: "Julia",
-            31: "Kotlin", 32: "LateX", 33: "Lisp", 34: "Logo", 35: "Lua", 36: "MATLAB",
-            37: "Makefile", 38: "Markdown", 39: "Nginx", 40: "Objective-C", 41: "OpenEdgeABL",
-            42: "PHP", 43: "Perl", 44: "PostScript", 45: "Power Shell", 46: "Prolog",
-            47: "ProtoBuf", 48: "Python", 49: "R", 50: "RPG", 51: "Ruby", 52: "Rust", 53: "SAS",
-            54: "SCSS", 55: "SQL", 56: "Scala", 57: "Scheme", 58: "Scratch", 59: "Shell",
-            60: "Swift", 61: "Thrift", 62: "TypeScript", 63: "VBScript", 64: "Visual Basic",
-            65: "XML", 66: "YAML",
-        }
-        lang = lang_map.get(code.get("style", {}).get("language", 0), "")
-        return f"```{lang}\n{extract_text(code.get('elements', []))}\n```"
-    elif btype == 15:  # quote
-        return "> " + extract_text(
-            block.get("quote_container", block.get("quote", {})).get("elements", [])
-        )
-    elif btype == 17:  # todo
-        todo = block.get("todo", {})
-        done = todo.get("style", {}).get("done", False)
-        return f"- [{'x' if done else ' '}] " + extract_text(todo.get("elements", []))
-    elif btype == 23:  # divider (old type)
-        return "---"
-    elif btype == 22:  # divider or table
-        if "divider" in block:
-            return "---"
-        else:
-            return table_block_to_md(block, block_map or {})
-    elif btype == 27:  # image
-        return "[图片]"
-    elif btype == 31 and isinstance(block.get("table"), dict):  # table in grid
-        return table_block_to_md(block, block_map or {})
-    elif btype == 18:  # bitable
-        return "[多维表格]"
-    elif btype == 31:  # grid
-        return "[分栏]"
-    elif btype == 19:  # callout
-        return callout_block_to_md(block, block_map or {})
-    else:
-        return extract_block_text(block)
-
-
-def parse_inline_styles(text):
-    """Parse markdown inline styles into feishu text_run elements with styles."""
-    if not text:
-        return [{"text_run": {"content": " "}}]
-    elements = []
-    pattern = re.compile(
-        r'(\*\*(.+?)\*\*)'           # bold
-        r'|(`([^`]+)`)'              # inline code
-        r'|(~~(.+?)~~)'              # strikethrough
-        r'|(\[([^\]]+)\]\(([^)]+)\))'  # link
-    )
-    pos = 0
-    for m in pattern.finditer(text):
-        if m.start() > pos:
-            elements.append({"text_run": {"content": text[pos:m.start()]}})
-        if m.group(2):  # bold
-            elements.append({"text_run": {"content": m.group(2), "text_element_style": {"bold": True}}})
-        elif m.group(4):  # inline code
-            elements.append({"text_run": {"content": m.group(4), "text_element_style": {"inline_code": True}}})
-        elif m.group(6):  # strikethrough
-            elements.append({"text_run": {"content": m.group(6), "text_element_style": {"strikethrough": True}}})
-        elif m.group(8):  # link
-            link_url = m.group(9)
-            if link_url.startswith("http://") or link_url.startswith("https://"):
-                elements.append({"text_run": {"content": m.group(8), "text_element_style": {"link": {"url": link_url}}}})
-            else:
-                elements.append({"text_run": {"content": f"[{m.group(8)}]({link_url})"}})
-        pos = m.end()
-    if pos < len(text):
-        elements.append({"text_run": {"content": text[pos:]}})
-    return elements if elements else [{"text_run": {"content": " "}}]
-
-
-def make_text_elements(text):
-    return parse_inline_styles(text)
-
-
-def make_plain_elements(text):
-    return [{"text_run": {"content": text}}] if text else [{"text_run": {"content": " "}}]
-
-
-def make_text_block(text):
-    return {"block_type": 2, "text": {"elements": make_text_elements(text)}}
-
-
-def make_heading_block(level, text):
-    level = max(1, min(level, 9))
-    block_type = level + 2  # H1=3, H2=4, ..., H9=11
-    key = f"heading{level}"
-    elements = [{"text_run": {"content": text, "text_element_style": {"bold": True}}}]
-    return {"block_type": block_type, key: {"elements": elements}}
-
-
-def make_bullet_block(text):
-    return {"block_type": 12, "bullet": {"elements": make_text_elements(text)}}
-
-
-def make_ordered_block(text):
-    return {"block_type": 13, "ordered": {"elements": make_text_elements(text)}}
-
-
-def make_code_block(code_text, lang=""):
-    lang_map = {
-        "sql": 56, "java": 29, "javascript": 30, "typescript": 63, "python": 49,
-        "go": 22, "bash": 7, "shell": 60, "json": 28, "yaml": 67, "xml": 66,
-        "html": 24, "css": 11, "groovy": 23, "lua": 36, "markdown": 39,
-        "nginx": 40, "php": 43, "c": 10, "cpp": 9, "c++": 9, "csharp": 8, "c#": 8,
-        "scala": 57, "ruby": 52, "rust": 53, "r": 50, "scss": 55,
-        "mermaid": 21, "plaintext": 21, "": 21,
-    }
-    lang_code = lang_map.get(lang.lower(), 21)
-    return {
-        "block_type": 14,
-        "code": {
-            "elements": make_plain_elements(code_text),
-            "style": {"language": lang_code},
-        },
-    }
-
-
-def make_quote_block(text):
-    return {"_callout": True, "_callout_text": text}
-
-
-def make_divider_block():
-    return {"block_type": 22, "divider": {}}
-
-
-def make_todo_block(text, done=False):
-    return {
-        "block_type": 17,
-        "todo": {
-            "elements": make_text_elements(text),
-            "style": {"done": done},
-        },
-    }
-
-
-def process(action, doc_url, access_token, doc_type, token, content_file=""):
+def process(action, doc_url, access_token, doc_type, token, content_file="", options=None):
     doc_token = token
+    options = options or {}
 
     if action == "read":
-        # 获取纯文本
-        resp = api_call("GET", f"/docx/v1/documents/{doc_token}/raw_content", access_token)
-        data = check_resp(resp, "获取文档内容", auto_retry_login=True)
-        content = data.get("content", "")
-
-        # 获取 blocks 并转为 markdown（支持翻页）
-        items = []
-        page_token = ""
-        while True:
-            url = f"/docx/v1/documents/{doc_token}/blocks?page_size=500"
-            if page_token:
-                url += f"&page_token={page_token}"
-            resp2 = api_call("GET", url, access_token)
-            blocks_data = resp2.get("data", {}) if resp2.get("code", -1) == 0 else {}
-            items.extend(blocks_data.get("items", []))
-            if not blocks_data.get("has_more", False):
-                break
-            page_token = blocks_data.get("page_token", "")
-            if not page_token:
-                break
-
-        block_map = {it.get("block_id"): it for it in items if it.get("block_id")}
-        skip_block_ids = set()
-        for it in items:
-            btype = it.get("block_type", 0)
-            # Skip table cell descendants
-            is_table = btype == 22 or (btype == 31 and isinstance(it.get("table"), dict))
-            if is_table:
-                table = it.get("table", {})
-                for cell_id in table.get("cells", []) or []:
-                    skip_block_ids.add(cell_id)
-                    skip_block_ids.update(collect_descendant_ids(cell_id, block_map))
-            # Skip callout children to avoid duplication
-            if btype == 19:
-                for child_id in it.get("children", []) or []:
-                    skip_block_ids.add(child_id)
-                    skip_block_ids.update(collect_descendant_ids(child_id, block_map))
-
-        md_lines = []
-        for item in items:
-            block_id = item.get("block_id", "")
-            if block_id and block_id in skip_block_ids:
-                continue
-            line = block_to_md(item, block_map)
-            if line is not None:
-                md_lines.append(line)
-
-        markdown = "\n".join(md_lines)
-        title = ""
-
-        out = {
-            "docUrl": doc_url,
-            "title": title if doc_type == "wiki" else "",
-            "blockCount": len(items),
-            "markdown": markdown,
-            "rawContent": content,
-        }
+        out = da.handle_read(
+            doc_url,
+            doc_type,
+            doc_token,
+            access_token,
+            api_call,
+            check_resp,
+            db.block_to_md,
+            db.collect_descendant_ids,
+        )
         print(json.dumps(out, ensure_ascii=False, indent=2))
 
     elif action == "clear":
-        page_block_id = doc_token
-        clear_resp = api_call("GET", f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}", access_token)
-        clear_data = check_resp(clear_resp, "获取文档块", auto_retry_login=True)
-        clear_children = clear_data.get("block", {}).get("children", [])
-        # 清空标题
-        api_call(
-            "PATCH",
-            f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}",
-            access_token,
-            {"update_text_elements": {"elements": [{"text_run": {"content": " "}}]}},
-        )
-        if not clear_children:
-            out = {"docUrl": doc_url, "action": "clear", "blocksDeleted": 0, "status": "success"}
-            print(json.dumps(out, ensure_ascii=False, indent=2))
-        else:
-            del_count = len(clear_children)
-            del_resp = api_call(
-                "DELETE",
-                f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}/children/batch_delete",
-                access_token,
-                {"start_index": 0, "end_index": del_count},
-            )
-            if del_resp.get("code") != 0:
-                remaining = del_count
-                while remaining > 0:
-                    batch = min(50, remaining)
-                    api_call(
-                        "DELETE",
-                        f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}/children/batch_delete",
-                        access_token,
-                        {"start_index": 0, "end_index": batch},
-                    )
-                    remaining -= batch
-                    time.sleep(0.3)
-            out = {"docUrl": doc_url, "action": "clear", "blocksDeleted": del_count, "status": "success"}
-            print(json.dumps(out, ensure_ascii=False, indent=2))
+        out = da.handle_clear(doc_url, doc_token, access_token, api_call, check_resp)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
 
-    elif action in ("write", "append"):
+    elif action == "insert-targeted":
         if not content_file:
-            print(f"❌ {action} 模式需要指定内容文件路径", file=sys.stderr)
+            print("❌ insert-targeted 模式需要指定内容文件路径", file=sys.stderr)
+            sys.exit(1)
+
+        anchor_type = str(options.get("anchor_type", "heading")).strip().lower()
+        anchor = str(options.get("anchor", "")).strip()
+        match_mode = str(options.get("match", "fuzzy")).strip().lower()
+        position = str(options.get("position", "after")).strip().lower()
+        yes_flag = ops.flag_enabled(options.get("yes", False))
+
+        if anchor_type not in ("heading", "text"):
+            print("❌ --anchor-type 仅支持 heading 或 text", file=sys.stderr)
+            sys.exit(1)
+        if match_mode not in ("fuzzy", "regex"):
+            print("❌ --match 仅支持 fuzzy 或 regex", file=sys.stderr)
+            sys.exit(1)
+        if position not in ("after", "section_end"):
+            print("❌ --position 仅支持 after 或 section_end", file=sys.stderr)
+            sys.exit(1)
+        if position == "section_end" and anchor_type != "heading":
+            print("❌ section_end 仅支持标题锚点（--anchor-type heading）", file=sys.stderr)
+            sys.exit(1)
+        if not anchor:
+            print("❌ insert-targeted 需要 --anchor", file=sys.stderr)
             sys.exit(1)
 
         with open(content_file, "r", encoding="utf-8") as f:
             content = f.read()
 
-        page_block_id = doc_token
-        BATCH_SIZE = 50
-        counter = [0]
-
-        def flush_blocks(block_list):
-            pending_buf = []
-            for blk in block_list:
-                if blk.get("_callout"):
-                    while pending_buf:
-                        batch = pending_buf[:BATCH_SIZE]
-                        pending_buf = pending_buf[BATCH_SIZE:]
-                        resp = api_call(
-                            "POST",
-                            f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}/children",
-                            access_token,
-                            {"children": batch, "index": -1},
-                        )
-                        check_resp(resp, "写入文档", auto_retry_login=True)
-                        counter[0] += len(batch)
-                        time.sleep(0.5)
-                    # 创建空 callout 块
-                    cb = {"block_type": 19, "callout": {"background_color": 15}}
-                    cr = api_call(
-                        "POST",
-                        f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}/children",
-                        access_token,
-                        {"children": [cb], "index": -1},
-                    )
-                    cd = check_resp(cr, "创建引用块", auto_retry_login=True)
-                    counter[0] += 1
-                    
-                    # 获取 callout 的 block_id 和自动创建的子块
-                    callout_id = cd.get("children", [{}])[0].get("block_id", "")
-                    if callout_id:
-                        # 获取 callout 的子块列表
-                        get_resp = api_call("GET", f"/docx/v1/documents/{doc_token}/blocks/{callout_id}", access_token)
-                        auto_children = get_resp.get("data", {}).get("block", {}).get("children", [])
-                        
-                        # 如果有自动创建的子块，直接更新第一个子块的内容，删除其余的
-                        if auto_children:
-                            first_child_id = auto_children[0]
-                            # 更新第一个子块的内容
-                            api_call(
-                                "PATCH",
-                                f"/docx/v1/documents/{doc_token}/blocks/{first_child_id}",
-                                access_token,
-                                {"update_text_elements": {"elements": make_text_elements(blk["_callout_text"])}},
-                            )
-                            # 删除其余的空子块
-                            for child_id in auto_children[1:]:
-                                api_call("DELETE", f"/docx/v1/documents/{doc_token}/blocks/{child_id}", access_token)
-                        else:
-                            # 如果没有自动创建的子块，添加我们的内容块
-                            cc = {"block_type": 2, "text": {"elements": make_text_elements(blk["_callout_text"])}}
-                            api_call(
-                                "POST",
-                                f"/docx/v1/documents/{doc_token}/blocks/{callout_id}/children",
-                                access_token,
-                                {"children": [cc], "index": -1},
-                            )
-                    time.sleep(0.3)
-                else:
-                    pending_buf.append(blk)
-            while pending_buf:
-                batch = pending_buf[:BATCH_SIZE]
-                pending_buf = pending_buf[BATCH_SIZE:]
-                resp = api_call(
-                    "POST",
-                    f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}/children",
-                    access_token,
-                    {"children": batch, "index": -1},
-                )
-                check_resp(resp, "写入文档", auto_retry_login=True)
-                counter[0] += len(batch)
-                time.sleep(0.5)
-
-        lines = content.split("\n")
-        children = []
-        doc_title_set = False
-        i = 0
-
-        while i < len(lines):
-            line = lines[i]
-
-            # 第一个 H1 标题 → 设置为文档标题（page block title），append 模式跳过
-            if not doc_title_set and re.match(r"^#\s+(.+)", line) and not re.match(r"^##", line):
-                title_text = re.match(r"^#\s+(.+)", line).group(1)
-                if action == "write":
-                    api_call(
-                        "PATCH",
-                        f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}",
-                        access_token,
-                        {"update_text_elements": {"elements": [{"text_run": {"content": title_text}}]}},
-                    )
-                else:
-                    children.append(make_heading_block(1, title_text))
-                doc_title_set = True
-                i += 1
-                continue
-
-            # 代码块
-            if line.strip().startswith("```"):
-                lang = line.strip()[3:].strip()
-                code_lines = []
-                i += 1
-                while i < len(lines) and not lines[i].strip().startswith("```"):
-                    code_lines.append(lines[i])
-                    i += 1
-                i += 1  # skip closing ```
-                code_text = "\n".join(code_lines)
-                # 自动检测语言
-                if not lang:
-                    ct = code_text.strip()
-                    if any(k in ct for k in ["CREATE TABLE", "ALTER TABLE", "INSERT INTO", "SELECT ", "DROP TABLE"]):
-                        lang = "sql"
-                    elif any(k in ct for k in ["@FeignClient", "public ", "private ", "interface ", "class ", "@Override", "@GetMapping", "@PostMapping", "import "]):
-                        lang = "java"
-                    elif ct.startswith("{") or ct.startswith("["):
-                        lang = "json"
-                    elif any(k in ct for k in ["flowchart", "sequenceDiagram", "stateDiagram", "erDiagram", "gantt"]):
-                        lang = "mermaid"
-                    elif any(k in ct for k in ["GET /", "POST /", "PUT /", "DELETE /"]):
-                        lang = "bash"
-                children.append(make_code_block(code_text, lang))
-                continue
-
-            # 空行 → 跳过
-            if not line.strip():
-                i += 1
-                continue
-
-            # 分割线
-            if re.match(r"^-{3,}$", line.strip()) or re.match(r"^\*{3,}$", line.strip()):
-                children.append(make_divider_block())
-                i += 1
-                continue
-
-            # 标题
-            hm = re.match(r"^(#{1,9})\s+(.*)", line)
-            if hm:
-                level = len(hm.group(1))
-                children.append(make_heading_block(level, hm.group(2)))
-                i += 1
-                continue
-
-            # 去掉前导空格用于匹配
-            stripped = line.lstrip()
-
-            # todo（支持缩进）
-            tm = re.match(r"^-\s*\[([ xX])\]\s*(.*)", stripped)
-            if tm:
-                done = tm.group(1).lower() == "x"
-                children.append(make_todo_block(tm.group(2), done))
-                i += 1
-                continue
-
-            # 无序列表（支持缩进）
-            if re.match(r"^[-*+]\s+", stripped):
-                text = re.sub(r"^[-*+]\s+", "", stripped)
-                children.append(make_bullet_block(text))
-                i += 1
-                continue
-
-            # 有序列表（支持缩进）
-            om = re.match(r"^\d+\.\s+(.*)", stripped)
-            if om:
-                children.append(make_ordered_block(om.group(1)))
-                i += 1
-                continue
-
-            # 引用（合并连续 > 行）
-            if stripped.startswith("> ") or stripped == ">" or (stripped.startswith(">") and not stripped.startswith(">" * 3)):
-                quote_lines = []
-                while i < len(lines):
-                    ql = lines[i].lstrip()
-                    if ql.startswith("> "):
-                        ql = ql[2:]
-                    elif ql.startswith(">"):
-                        ql = ql[1:]
-                    else:
-                        break
-                    quote_lines.append(ql)
-                    i += 1
-                children.append(make_quote_block("\n".join(quote_lines)))
-                continue
-
-            # 表格 → 飞书原生表格
-            if stripped.startswith("|") and i + 1 < len(lines) and re.match(r"^\s*\|[\s\-:|]+\|?\s*$", lines[i + 1]):
-                table_lines = []
-                while i < len(lines) and lines[i].strip().startswith("|"):
-                    table_lines.append(lines[i].strip())
-                    i += 1
-                if len(table_lines) >= 2:
-                    header_cells = [c.strip() for c in table_lines[0].split("|") if c.strip()]
-                    data_rows = []
-                    for row_line in table_lines[2:]:
-                        cells = [c.strip() for c in row_line.split("|") if c.strip()]
-                        data_rows.append(cells)
-                    col_size = len(header_cells)
-                    row_size = 1 + len(data_rows)
-                    # 计算列宽
-                    all_rows_for_width = [header_cells] + data_rows
-                    col_max_len = [0] * col_size
-                    for row_cells in all_rows_for_width:
-                        for ci in range(min(len(row_cells), col_size)):
-                            col_max_len[ci] = max(col_max_len[ci], len(row_cells[ci]))
-                    total_len = max(sum(col_max_len), 1)
-                    total_width = 700
-                    col_widths = [max(100, int(total_width * cl / total_len)) for cl in col_max_len]
-                    # 先把当前 children 写入
-                    flush_blocks(children)
-                    children = []
-                    # 大表格拆分：每个子表最多 8 行数据 + 1 行表头 = 9 行
-                    MAX_DATA_ROWS = 8
-                    from concurrent.futures import ThreadPoolExecutor
-
-                    def create_and_fill_table(h_cells, d_rows, c_size, c_widths):
-                        sub_row_size = 1 + len(d_rows)
-                        tb = {
-                            "block_type": 31,
-                            "table": {
-                                "property": {
-                                    "row_size": sub_row_size,
-                                    "column_size": c_size,
-                                    "column_width": c_widths,
-                                    "header_row": True,
-                                },
-                            },
-                        }
-                        tr = api_call(
-                            "POST",
-                            f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}/children",
-                            access_token,
-                            {"children": [tb], "index": -1},
-                        )
-                        if tr.get("code", -1) != 0:
-                            print(
-                                f"⚠️ 表格创建失败({sub_row_size}x{c_size}), fallback: {tr.get('msg', '')[:80]}",
-                                file=sys.stderr,
-                            )
-                            return False
-                        counter[0] += 1
-                        tc = tr.get("data", {}).get("children", [])
-                        if tc:
-                            cids = tc[0].get("table", {}).get("cells", [])
-                            a_rows = [h_cells] + d_rows
-
-                            def fill_cell(args):
-                                cell_id, text, is_header = args
-                                el = make_plain_elements(text) if is_header else make_text_elements(text)
-                                
-                                # 获取单元格的子块列表
-                                get_resp = api_call("GET", f"/docx/v1/documents/{doc_token}/blocks/{cell_id}", access_token)
-                                auto_children = get_resp.get("data", {}).get("block", {}).get("children", [])
-                                
-                                # 如果有自动创建的子块，更新第一个，删除其余的
-                                if auto_children:
-                                    first_child_id = auto_children[0]
-                                    api_call(
-                                        "PATCH",
-                                        f"/docx/v1/documents/{doc_token}/blocks/{first_child_id}",
-                                        access_token,
-                                        {"update_text_elements": {"elements": el}},
-                                    )
-                                    # 删除其余的空子块
-                                    for child_id in auto_children[1:]:
-                                        api_call("DELETE", f"/docx/v1/documents/{doc_token}/blocks/{child_id}", access_token)
-                                else:
-                                    # 如果没有自动创建的子块，添加内容块
-                                    cell_block = {"block_type": 2, "text": {"elements": el}}
-                                    api_call(
-                                        "POST",
-                                        f"/docx/v1/documents/{doc_token}/blocks/{cell_id}/children",
-                                        access_token,
-                                        {"children": [cell_block], "index": -1},
-                                    )
-                                time.sleep(0.02)  # 适当延迟避免竞态条件
-
-                            # 批次并发执行：每批 num_workers 个单元格并发处理，批次之间串行
-                            # 确保第一批 [0,1,2,3,4] 全部完成后，再处理第二批 [5,6,7,8,9]
-                            num_workers = 5
-                            
-                            tasks = []
-                            for ri, rc in enumerate(a_rows):
-                                for ci2 in range(c_size):
-                                    cidx = ri * c_size + ci2
-                                    if cidx >= len(cids):
-                                        break
-                                    ct = rc[ci2] if ci2 < len(rc) else ""
-                                    tasks.append((cids[cidx], ct, ri == 0))
-                            
-                            # 分批处理：每批最多 num_workers 个任务并发
-                            for batch_start in range(0, len(tasks), num_workers):
-                                batch = tasks[batch_start:batch_start + num_workers]
-                                with ThreadPoolExecutor(max_workers=num_workers) as pool:
-                                    futures = [pool.submit(fill_cell, task) for task in batch]
-                                    for future in futures:
-                                        future.result()  # 等待当前批次完成
-                        time.sleep(0.5)
-                        return True
-
-                    # 拆分数据行
-                    for chunk_start in range(0, len(data_rows), MAX_DATA_ROWS):
-                        chunk = data_rows[chunk_start:chunk_start + MAX_DATA_ROWS]
-                        if not create_and_fill_table(header_cells, chunk, col_size, col_widths):
-                            # fallback: 整个表格用代码块
-                            children.append(make_code_block("\n".join(table_lines), "markdown"))
-                            break
-                continue
-
-            # 跳过空行（避免在引用块、表格后多出空白块）
-            if not line.strip():
-                i += 1
-                continue
-
-            # 普通文本
-            children.append(make_text_block(line))
-            i += 1
-
-        if not children and counter[0] == 0:
+        block_list = ops.parse_markdown_for_targeted_insert(
+            content,
+            db.make_heading_block,
+            db.make_code_block,
+            db.make_divider_block,
+            db.make_todo_block,
+            db.make_bullet_block,
+            db.make_ordered_block,
+            db.make_quote_block,
+            db.make_text_block,
+        )
+        if not block_list:
             print("❌ 内容为空", file=sys.stderr)
             sys.exit(1)
 
-        # 写入所有剩余 blocks
-        flush_blocks(children)
+        items, block_map = ops.fetch_all_blocks(doc_token, access_token, api_call, check_resp)
+        parent_map, index_map = ops.build_parent_index_maps(block_map)
+
+        candidates = ops.find_anchor_candidates(
+            items,
+            block_map,
+            anchor_type,
+            anchor,
+            match_mode,
+            db.get_block_text_by_id,
+            db.extract_text,
+        )
+        target = ops.resolve_single_candidate(candidates, items, anchor, anchor_type, db.extract_text)
+        target_id = target["block_id"]
+
+        if target_id == doc_token:
+            print("❌ 定点插入不支持文档标题（page）作为锚点，请选择具体章节标题或正文文本", file=sys.stderr)
+            sys.exit(1)
+
+        parent_id = parent_map.get(target_id)
+        if not parent_id and target_id == doc_token:
+            parent_id = doc_token
+        if not parent_id:
+            print("❌ 无法定位锚点父块", file=sys.stderr)
+            sys.exit(1)
+
+        siblings = block_map.get(parent_id, {}).get("children", [])
+        target_index = index_map.get((parent_id, target_id), 0)
+        insert_index = target_index + 1
+
+        if position == "section_end":
+            target_block = block_map.get(target_id, {})
+            lvl = ops.heading_level(target_block)
+            if lvl is None:
+                print("❌ section_end 需要标题锚点", file=sys.stderr)
+                sys.exit(1)
+            insert_index = ops.compute_section_end_index(siblings, target_index, lvl, block_map)
+
+        preview = {
+            "anchorType": anchor_type,
+            "anchor": anchor,
+            "matchMode": match_mode,
+            "position": position,
+            "targetBlockId": target_id,
+            "targetText": target["text"],
+            "parentBlockId": parent_id,
+            "insertIndex": insert_index,
+            "blocksToAdd": len(block_list),
+            "contentPreview": ops.summarize_content(content),
+        }
+        ops.confirm_with_preview(preview, yes_flag, "insert-targeted")
+
+        added = ops.insert_blocks_at_index(
+            doc_token,
+            access_token,
+            parent_id,
+            insert_index,
+            block_list,
+            api_call,
+            check_resp,
+            db.make_text_elements,
+        )
+        out = {
+            "docUrl": doc_url,
+            "action": "insert-targeted",
+            "anchor": target["text"],
+            "position": position,
+            "blocksAdded": added,
+            "status": "success",
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+
+    elif action == "delete-section":
+        anchor = str(options.get("anchor", "")).strip()
+        match_mode = str(options.get("match", "fuzzy")).strip().lower()
+        yes_flag = ops.flag_enabled(options.get("yes", False))
+
+        if not anchor:
+            print("❌ delete-section 需要 --anchor", file=sys.stderr)
+            sys.exit(1)
+        if match_mode not in ("fuzzy", "regex"):
+            print("❌ --match 仅支持 fuzzy 或 regex", file=sys.stderr)
+            sys.exit(1)
+
+        items, block_map = ops.fetch_all_blocks(doc_token, access_token, api_call, check_resp)
+        parent_map, index_map = ops.build_parent_index_maps(block_map)
+
+        candidates = ops.find_anchor_candidates(
+            items,
+            block_map,
+            "heading",
+            anchor,
+            match_mode,
+            db.get_block_text_by_id,
+            db.extract_text,
+        )
+        target = ops.resolve_single_candidate(candidates, items, anchor, "heading", db.extract_text)
+        target_id = target["block_id"]
+
+        if target_id == doc_token:
+            print("❌ delete-section 不支持删除文档标题（page），请指定具体章节标题", file=sys.stderr)
+            sys.exit(1)
+
+        parent_id = parent_map.get(target_id)
+        if not parent_id and target_id == doc_token:
+            parent_id = doc_token
+        if not parent_id:
+            print("❌ 无法定位目标章节父块", file=sys.stderr)
+            sys.exit(1)
+
+        siblings = block_map.get(parent_id, {}).get("children", [])
+        target_index = index_map.get((parent_id, target_id), 0)
+        target_block = block_map.get(target_id, {})
+        lvl = ops.heading_level(target_block)
+        if lvl is None:
+            print("❌ delete-section 仅支持标题锚点", file=sys.stderr)
+            sys.exit(1)
+
+        section_end = ops.compute_section_end_index(siblings, target_index, lvl, block_map)
+        children_to_delete = max(0, section_end - (target_index + 1))
+        total_to_delete = children_to_delete + 1
+
+        preview = {
+            "anchor": anchor,
+            "matchMode": match_mode,
+            "targetBlockId": target_id,
+            "targetHeading": target["text"],
+            "parentBlockId": parent_id,
+            "deleteRange": {
+                "childrenStartIndex": target_index + 1,
+                "childrenEndIndex": section_end,
+                "headingIndex": target_index,
+            },
+            "blocksToDelete": total_to_delete,
+            "rule": "先删除子章节/内容，再删除标题",
+        }
+        ops.confirm_with_preview(preview, yes_flag, "delete-section")
+
+        deleted_children = ops.delete_children_range(
+            doc_token,
+            access_token,
+            parent_id,
+            target_index + 1,
+            section_end,
+            api_call,
+            check_resp,
+        )
+        deleted_heading = ops.delete_children_range(
+            doc_token,
+            access_token,
+            parent_id,
+            target_index,
+            target_index + 1,
+            api_call,
+            check_resp,
+        )
 
         out = {
             "docUrl": doc_url,
-            "action": "write",
-            "blocksAdded": counter[0],
-            "totalBatches": (len(children) + BATCH_SIZE - 1) // BATCH_SIZE,
+            "action": "delete-section",
+            "anchor": target["text"],
+            "blocksDeleted": deleted_children + deleted_heading,
             "status": "success",
         }
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+
+    elif action in ("write", "append"):
+        out = da.handle_write_append(
+            action,
+            doc_url,
+            doc_token,
+            access_token,
+            content_file,
+            {
+                "api_call": api_call,
+                "check_resp": check_resp,
+                "make_heading_block": db.make_heading_block,
+                "make_code_block": db.make_code_block,
+                "make_divider_block": db.make_divider_block,
+                "make_todo_block": db.make_todo_block,
+                "make_bullet_block": db.make_bullet_block,
+                "make_ordered_block": db.make_ordered_block,
+                "make_quote_block": db.make_quote_block,
+                "make_text_block": db.make_text_block,
+                "make_plain_elements": db.make_plain_elements,
+                "make_text_elements": db.make_text_elements,
+            },
+        )
         print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
@@ -998,13 +544,26 @@ def main():
 
     action = sys.argv[1]
     doc_url = sys.argv[2]
-    content_file = sys.argv[3] if len(sys.argv) > 3 else ""
+    args_after_url = sys.argv[3:]
+    content_file = ""
+    options = {}
+
+    if action in ("write", "append"):
+        content_file = args_after_url[0] if args_after_url else ""
+    elif action == "insert-targeted":
+        pos, options = ops.parse_cli_options(args_after_url)
+        content_file = pos[0] if pos else ""
+    elif action == "delete-section":
+        _, options = ops.parse_cli_options(args_after_url)
 
     if not doc_url:
         usage()
 
-    if action not in ("read", "write", "append", "clear"):
-        print(f"❌ 不支持的操作: {action}，请使用 read / write / append / clear", file=sys.stderr)
+    if action not in ("read", "write", "append", "clear", "insert-targeted", "delete-section"):
+        print(
+            f"❌ 不支持的操作: {action}，请使用 read / write / append / clear / insert-targeted / delete-section",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # 解析 URL
@@ -1072,7 +631,7 @@ def main():
             sys.exit(1)
 
     # 执行操作
-    process(action, doc_url, access_token, doc_type, token, content_file)
+    process(action, doc_url, access_token, doc_type, token, content_file, options)
 
 
 if __name__ == "__main__":

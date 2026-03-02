@@ -109,6 +109,16 @@ app_secret=xxxx
 **清空文档**
 > "帮我清空 https://xxx.feishu.cn/wiki/TOKEN"
 
+**在某章节后追加（支持模糊匹配 / 正则）**
+> "在『技术方案』章节末尾追加这段内容"
+
+**删除某个章节后重写**
+> "先删除『技术方案』章节，再把这段新内容写进去"
+
+> ⚠️ 安全保护：
+> - `insert-targeted` 和 `delete-section` 默认都会先展示预览，并要求输入 `yes` 确认后才执行。
+> - 非交互执行时需要显式传 `--yes`。
+
 **首次使用时**，系统会自动检测到未登录并打开浏览器授权页，你只需点击「授权」即可。Token 过期时也会自动重新登录。
 
 ---
@@ -123,6 +133,44 @@ app_secret=xxxx
 - 表格（自动拆分为飞书原生表格，每个子表最多 8 行数据 + 1 行表头，大表格无缝支持）
 - 分割线
 - 行内样式：**加粗**、`行内代码`、~~删除线~~、[超链接](url)
+
+---
+
+## 高级操作（定点插入 / 章节删除）
+
+### 1) 定点插入（insert-targeted）
+
+```bash
+python3 scripts/index.py insert-targeted "<Feishu_URL>" "<content_file>" \
+  --anchor-type heading --anchor "技术方案" --match fuzzy --position section_end
+```
+
+- `--anchor-type`：`heading`（按标题）或 `text`（按文本）
+- `--match`：`fuzzy`（模糊匹配）或 `regex`（正则匹配）
+- `--position`：`after`（锚点后）或 `section_end`（章节末尾，仅 heading）
+
+### 2) 删除章节（delete-section）
+
+```bash
+python3 scripts/index.py delete-section "<Feishu_URL>" \
+  --anchor "技术方案" --match fuzzy
+```
+
+删除规则：
+- 先删除该章节下的所有内容（直到下一个同级或更高级标题）
+- 最后删除目标标题本身
+
+### 3) 非交互自动执行（显式确认）
+
+```bash
+# 定点插入
+python3 scripts/index.py insert-targeted "<Feishu_URL>" "<content_file>" \
+  --anchor-type heading --anchor "技术方案" --match fuzzy --position section_end --yes
+
+# 删除章节
+python3 scripts/index.py delete-section "<Feishu_URL>" \
+  --anchor "技术方案" --match fuzzy --yes
+```
 
 ---
 
