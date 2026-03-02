@@ -136,41 +136,23 @@ app_secret=xxxx
 
 ---
 
-## 高级操作（定点插入 / 章节删除）
+## 高级能力（无需记命令）
 
-### 1) 定点插入（insert-targeted）
+下面这些能力，直接在 AI IDE 里用自然语言描述即可：
 
-```bash
-python3 scripts/index.py insert-targeted "<Feishu_URL>" "<content_file>" \
-  --anchor-type heading --anchor "技术方案" --match fuzzy --position section_end
-```
+- 在某个章节后追加内容
+- 在某段文本后插入内容
+- 删除某个章节后重写
 
-- `--anchor-type`：`heading`（按标题）或 `text`（按文本）
-- `--match`：`fuzzy`（模糊匹配）或 `regex`（正则匹配）
-- `--position`：`after`（锚点后）或 `section_end`（章节末尾，仅 heading）
+示例：
 
-### 2) 删除章节（delete-section）
+> "在『技术方案』章节末尾追加这段内容"
 
-```bash
-python3 scripts/index.py delete-section "<Feishu_URL>" \
-  --anchor "技术方案" --match fuzzy
-```
+> "在『数据库设计如下』这段话后面插入这段说明"
 
-删除规则：
-- 先删除该章节下的所有内容（直到下一个同级或更高级标题）
-- 最后删除目标标题本身
+> "先删除『技术方案』章节，再把这段新内容写进去"
 
-### 3) 非交互自动执行（显式确认）
-
-```bash
-# 定点插入
-python3 scripts/index.py insert-targeted "<Feishu_URL>" "<content_file>" \
-  --anchor-type heading --anchor "技术方案" --match fuzzy --position section_end --yes
-
-# 删除章节
-python3 scripts/index.py delete-section "<Feishu_URL>" \
-  --anchor "技术方案" --match fuzzy --yes
-```
+> ⚠️ 安全保护：涉及定点插入和章节删除时，系统会先给你预览，再确认执行。
 
 ---
 
