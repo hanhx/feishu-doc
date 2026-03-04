@@ -103,7 +103,7 @@ app_secret=xxxx
 **读取文档**
 > "帮我读一下这个飞书文档 https://xxx.feishu.cn/wiki/TOKEN"
 
-**写入文档**
+**写入文档（覆盖更新）**
 > "帮我把这个方案写到 https://xxx.feishu.cn/wiki/TOKEN"
 
 **清空文档**

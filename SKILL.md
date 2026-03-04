@@ -33,7 +33,7 @@ python3 scripts/index.py read "<Feishu_URL>"
 python3 scripts/index.py clear "<Feishu_URL>"
 ```
 
-**写入文档**（全量写入，第一个 H1 设为文档标题）：
+**写入文档**（覆盖更新：先清空再写入，第一个 H1 设为文档标题）：
 ```bash
 python3 scripts/index.py write "<Feishu_URL>" "<content_file>"
 ```
@@ -67,6 +67,9 @@ python3 scripts/index.py delete-section "<Feishu_URL>" \
 示例：`https://nio.feishu.cn/wiki/XPK4w1xGDi4ntbkdc2Mcu1FVnac`
 
 ## 认证配置
+
+> **环境变量优先**：脚本会优先读取 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，未设置时才读取 `assets/.feishu`。
+> Skill 本身不会注入环境变量，请确保运行命令的终端/环境已设置这些变量。
 
 支持两种认证方式，优先使用个人授权。
 

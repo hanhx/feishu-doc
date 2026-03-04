@@ -125,6 +125,10 @@ def handle_write_append(action, doc_url, doc_token, access_token, content_file, 
     batch_size = 50
     counter = [0]
 
+    # write 语义：覆盖更新（先清空正文，再写入新内容）
+    if action == "write":
+        handle_clear(doc_url, doc_token, access_token, api_call, check_resp)
+
     def flush_blocks(block_list):
         pending_buf = []
         for blk in block_list:
