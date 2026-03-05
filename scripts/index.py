@@ -14,6 +14,7 @@ from fd_modules import targeted_ops as ops
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FEISHU_FILE = os.path.join(SCRIPT_DIR, "..", "assets", ".feishu")
+FEISHU_FILE_LOCAL = os.path.join(SCRIPT_DIR, "..", "assets", ".feishu.local")
 TOKEN_CACHE = os.path.join(SCRIPT_DIR, "..", "assets", ".token_cache")
 USER_TOKEN_CACHE = os.path.join(SCRIPT_DIR, "..", "assets", ".user_token_cache")
 API_BASE = "https://open.feishu.cn/open-apis"
@@ -39,7 +40,7 @@ def usage():
     print()
     print("认证方式（优先级从高到低）：")
     print("  1. user_access_token：先运行 login.py 授权")
-    print("  2. tenant_access_token：在 ../assets/.feishu 配置 app_id + app_secret")
+    print("  2. tenant_access_token：在 ../assets/.feishu.local 或 ../assets/.feishu 配置 app_id + app_secret")
     sys.exit(1)
 
 
@@ -49,19 +50,27 @@ def get_config(key):
     env_val = os.environ.get(env_map.get(key, ""), "")
     if env_val:
         return env_val
-    if not os.path.isfile(FEISHU_FILE):
+
+    def read_config_file(path):
+        if not os.path.isfile(path):
+            return ""
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if k == key:
+                        return v
         return ""
-    with open(FEISHU_FILE, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip()
-                if k == key:
-                    return v
+
+    for path in (FEISHU_FILE_LOCAL, FEISHU_FILE):
+        value = read_config_file(path)
+        if value:
+            return value
     return ""
 
 
@@ -111,7 +120,14 @@ def get_user_access_token(app_id, app_secret):
         return ""
 
     with open(USER_TOKEN_CACHE, "r") as f:
-        cache = json.loads(f.read())
+        cache_text = f.read().strip()
+    if not cache_text:
+        return ""
+    try:
+        cache = json.loads(cache_text)
+    except json.JSONDecodeError:
+        print("❌ token 缓存损坏，请重新登录", file=sys.stderr)
+        return ""
 
     access_token = cache.get("access_token", "")
     refresh_token = cache.get("refresh_token", "")
@@ -588,7 +604,7 @@ def main():
         print("      方式A: 环境变量（推荐）", file=sys.stderr)
         print("        export FEISHU_APP_ID=cli_xxxx", file=sys.stderr)
         print("        export FEISHU_APP_SECRET=xxxx", file=sys.stderr)
-        print("      方式B: 编辑 assets/.feishu 文件", file=sys.stderr)
+        print("      方式B: 编辑 assets/.feishu.local 或 assets/.feishu 文件", file=sys.stderr)
         print("        app_id=cli_xxxx", file=sys.stderr)
         print("        app_secret=xxxx", file=sys.stderr)
         print("", file=sys.stderr)

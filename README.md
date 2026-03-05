@@ -89,7 +89,7 @@ export FEISHU_APP_SECRET=xxxx
 
 **方式2：配置文件**
 
-编辑 `assets/.feishu`，填入你的凭证：
+编辑 `assets/.feishu` 填入凭证：
 
 ```
 app_id=cli_xxxx
@@ -184,7 +184,7 @@ python3 scripts/login.py logout && python3 scripts/login.py
 
 - **跟应用绑定，不跟个人绑定**。同一个飞书组织内的成员可以共用同一对 app_id / app_secret。
 - app_id + app_secret 用于启动 OAuth 授权流程，**本身不能直接访问任何文档**。
-- 建议：**不要提交到公开仓库**，通过 `.gitignore` 忽略 `assets/.feishu` 文件。
+- 建议：**不要提交到公开仓库**，通过 `.gitignore` 忽略 `assets/.feishu.local` 文件；`assets/.feishu` 仅作为空模板。
 
 ### User Access Token
 

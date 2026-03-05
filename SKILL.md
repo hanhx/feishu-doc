@@ -68,7 +68,7 @@ python3 scripts/index.py delete-section "<Feishu_URL>" \
 
 ## 认证配置
 
-> **环境变量优先**：脚本会优先读取 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，未设置时才读取 `assets/.feishu`。
+> **环境变量优先**：脚本会优先读取 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，未设置时才读取 `assets/.feishu.local`，最后才读取模板 `assets/.feishu`。
 > Skill 本身不会注入环境变量，请确保运行命令的终端/环境已设置这些变量。
 
 支持两种认证方式，优先使用个人授权。

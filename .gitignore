@@ -2,7 +2,7 @@
 .idea/
 assets/.token_cache
 assets/.user_token_cache
-assets/.feishu
+assets/.feishu.local
 
 # Python
 __pycache__/

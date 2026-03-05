@@ -12,6 +12,7 @@ import http.server
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FEISHU_FILE = os.path.join(SCRIPT_DIR, "..", "assets", ".feishu")
+FEISHU_FILE_LOCAL = os.path.join(SCRIPT_DIR, "..", "assets", ".feishu.local")
 USER_TOKEN_CACHE = os.path.join(SCRIPT_DIR, "..", "assets", ".user_token_cache")
 API_BASE = "https://open.feishu.cn/open-apis"
 PORT = 9999
@@ -23,19 +24,27 @@ def get_config(key):
     env_val = os.environ.get(env_map.get(key, ""), "")
     if env_val:
         return env_val
-    if not os.path.isfile(FEISHU_FILE):
+
+    def read_config_file(path):
+        if not os.path.isfile(path):
+            return ""
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if k == key:
+                        return v
         return ""
-    with open(FEISHU_FILE, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip()
-                if k == key:
-                    return v
+
+    for path in (FEISHU_FILE_LOCAL, FEISHU_FILE):
+        value = read_config_file(path)
+        if value:
+            return value
     return ""
 
 
