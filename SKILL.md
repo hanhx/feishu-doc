@@ -43,7 +43,7 @@ python3 scripts/index.py write "<Feishu_URL>" "<content_file>"
 python3 scripts/index.py append "<Feishu_URL>" "<content_file>"
 ```
 
-**定点插入**（按标题/文本定位，支持模糊匹配和正则）：
+**定点插入**（按标题/文本定位，支持模糊匹配和正则；必须提供内容文件路径，不支持 stdin）：
 ```bash
 python3 scripts/index.py insert-targeted "<Feishu_URL>" "<content_file>" \
   --anchor-type heading --anchor "技术方案" --match fuzzy --position section_end
