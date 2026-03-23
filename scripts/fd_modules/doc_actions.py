@@ -51,10 +51,14 @@ def handle_read(doc_url, doc_type, doc_token, access_token, api_call, check_resp
 
     markdown = "\n".join(md_lines)
     title = ""
+    for line in md_lines:
+        if line.startswith("# "):
+            title = line[2:].strip()
+            break
 
     return {
         "docUrl": doc_url,
-        "title": title if doc_type == "wiki" else "",
+        "title": title,
         "blockCount": len(items),
         "markdown": markdown,
         "rawContent": content,
