@@ -235,6 +235,11 @@ def api_call(method, path, access_token, body=None, retries=3):
                 return json.loads(error_body)
             except Exception:
                 return {"code": e.code, "msg": error_body}
+        except urllib.error.URLError as e:
+            if attempt < retries - 1:
+                time.sleep(1 * (attempt + 1))
+                continue
+            return {"code": -1, "msg": str(e)}
     return {"code": 429, "msg": "rate limited after retries"}
 
 
@@ -423,6 +428,7 @@ def process(action, doc_url, access_token, doc_type, token, content_file="", opt
             api_call,
             check_resp,
             db.make_text_elements,
+            db.make_plain_elements,
         )
         out = {
             "docUrl": doc_url,

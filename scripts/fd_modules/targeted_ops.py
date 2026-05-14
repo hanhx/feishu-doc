@@ -2,6 +2,7 @@ import json
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 
 def parse_cli_options(args):
@@ -262,13 +263,35 @@ def parse_markdown_for_targeted_insert(
             children.append(make_quote_block("\n".join(quote_lines)))
             continue
 
-        # 定点插入场景下，表格回退为 markdown 代码块，避免复杂的表格结构插入偏移问题
+        # 表格：解析为原生表格标记，由 insert_blocks_at_index 负责创建
         if stripped.startswith("|") and i + 1 < len(lines) and re.match(r"^\s*\|[\s\-:|]+\|?\s*$", lines[i + 1]):
             table_lines = []
             while i < len(lines) and lines[i].strip().startswith("|"):
                 table_lines.append(lines[i].strip())
                 i += 1
-            children.append(make_code_block("\n".join(table_lines), "markdown"))
+            if len(table_lines) >= 2:
+                header_cells = [c.strip() for c in table_lines[0].split("|") if c.strip()]
+                data_rows = []
+                for row_line in table_lines[2:]:
+                    cells = [c.strip() for c in row_line.split("|") if c.strip()]
+                    data_rows.append(cells)
+                col_size = len(header_cells)
+                all_rows_for_width = [header_cells] + data_rows
+                col_max_len = [0] * col_size
+                for row_cells in all_rows_for_width:
+                    for ci in range(min(len(row_cells), col_size)):
+                        col_max_len[ci] = max(col_max_len[ci], len(row_cells[ci]))
+                total_len = max(sum(col_max_len), 1)
+                total_width = 700
+                col_widths = [max(100, int(total_width * cl / total_len)) for cl in col_max_len]
+                children.append({
+                    "_native_table": True,
+                    "_header_cells": header_cells,
+                    "_data_rows": data_rows,
+                    "_col_size": col_size,
+                    "_col_widths": col_widths,
+                    "_raw_lines": table_lines,
+                })
             continue
 
         children.append(make_text_block(line))
@@ -286,6 +309,7 @@ def insert_blocks_at_index(
     api_call,
     check_resp,
     make_text_elements,
+    make_plain_elements=None,
 ):
     batch_size = 50
     current_index = insert_index
@@ -349,6 +373,93 @@ def insert_blocks_at_index(
                         {"children": [cc], "index": -1},
                     )
             time.sleep(0.3)
+        elif blk.get("_native_table"):
+            flush_pending()
+            header_cells = blk["_header_cells"]
+            data_rows = blk["_data_rows"]
+            col_size = blk["_col_size"]
+            col_widths = blk["_col_widths"]
+            raw_lines = blk["_raw_lines"]
+            max_data_rows = 8
+            _plain_el = make_plain_elements if make_plain_elements else make_text_elements
+
+            def create_and_fill_table(h_cells, d_rows, c_size, c_widths):
+                idx = current_index if current_index is not None else -1
+                tb = {
+                    "block_type": 31,
+                    "table": {
+                        "property": {
+                            "row_size": 1 + len(d_rows),
+                            "column_size": c_size,
+                            "column_width": c_widths,
+                            "header_row": True,
+                        },
+                    },
+                }
+                tr = api_call(
+                    "POST",
+                    f"/docx/v1/documents/{doc_token}/blocks/{parent_block_id}/children",
+                    access_token,
+                    {"children": [tb], "index": idx},
+                )
+                if tr.get("code", -1) != 0:
+                    print(f"⚠️ 表格创建失败, fallback: {tr.get('msg', '')[:80]}", file=sys.stderr)
+                    return False
+                tc = tr.get("data", {}).get("children", [])
+                if tc:
+                    cids = tc[0].get("table", {}).get("cells", [])
+                    a_rows = [h_cells] + d_rows
+
+                    def fill_cell(args):
+                        cell_id, text, is_header = args
+                        el = _plain_el(text) if is_header else make_text_elements(text)
+                        get_resp = api_call("GET", f"/docx/v1/documents/{doc_token}/blocks/{cell_id}", access_token)
+                        auto_children = get_resp.get("data", {}).get("block", {}).get("children", [])
+                        if auto_children:
+                            first_child_id = auto_children[0]
+                            api_call("PATCH", f"/docx/v1/documents/{doc_token}/blocks/{first_child_id}", access_token,
+                                     {"update_text_elements": {"elements": el}})
+                            for child_id in auto_children[1:]:
+                                api_call("DELETE", f"/docx/v1/documents/{doc_token}/blocks/{child_id}", access_token)
+                        else:
+                            cell_block = {"block_type": 2, "text": {"elements": el}}
+                            api_call("POST", f"/docx/v1/documents/{doc_token}/blocks/{cell_id}/children",
+                                     access_token, {"children": [cell_block], "index": -1})
+                        time.sleep(0.02)
+
+                    tasks = []
+                    for ri, rc in enumerate(a_rows):
+                        for ci2 in range(c_size):
+                            cidx = ri * c_size + ci2
+                            if cidx >= len(cids):
+                                break
+                            ct = rc[ci2] if ci2 < len(rc) else ""
+                            tasks.append((cids[cidx], ct, ri == 0))
+                    for batch_start in range(0, len(tasks), 5):
+                        batch = tasks[batch_start:batch_start + 5]
+                        with ThreadPoolExecutor(max_workers=5) as pool:
+                            futures = [pool.submit(fill_cell, task) for task in batch]
+                            for future in futures:
+                                future.result()
+                time.sleep(0.5)
+                return True
+
+            success = False
+            for chunk_start in range(0, len(data_rows), max_data_rows):
+                chunk = data_rows[chunk_start:chunk_start + max_data_rows]
+                if not create_and_fill_table(header_cells, chunk, col_size, col_widths):
+                    # fallback: code block
+                    fb = api_call(
+                        "POST",
+                        f"/docx/v1/documents/{doc_token}/blocks/{parent_block_id}/children",
+                        access_token,
+                        {"children": [{"block_type": 14, "code": {"language": 1, "elements": [{"text_run": {"content": "\n".join(raw_lines)}}]}}],
+                         "index": current_index if current_index is not None else -1},
+                    )
+                    check_resp(fb, "插入表格(fallback代码块)", auto_retry_login=True)
+                added += 1
+                if current_index is not None:
+                    current_index += 1
         else:
             pending.append(blk)
 
