@@ -6,8 +6,17 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 def handle_read(doc_url, doc_type, doc_token, access_token, api_call, check_resp, block_to_md, collect_descendant_ids):
+    if doc_type == "docs":
+        print("❌ 暂不支持旧版 docs/doccn 文档", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("   请将文档转为新版 docx 后再读取。", file=sys.stderr)
+        print("   旧版链接示例: https://xxx.feishu.cn/docs/doccn...", file=sys.stderr)
+        print("   新版链接示例: https://xxx.feishu.cn/docx/... 或 https://xxx.feishu.cn/wiki/...", file=sys.stderr)
+        sys.exit(1)
+
+    action_name = "获取 wiki 文档内容" if doc_type == "wiki" else "获取文档内容"
     resp = api_call("GET", f"/docx/v1/documents/{doc_token}/raw_content", access_token)
-    data = check_resp(resp, "获取文档内容", auto_retry_login=True)
+    data = check_resp(resp, action_name, auto_retry_login=True)
     content = data.get("content", "")
 
     items = []

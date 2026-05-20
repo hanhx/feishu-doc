@@ -103,6 +103,8 @@ app_secret=xxxx
 **读取文档**
 > "帮我读一下这个飞书文档 https://xxx.feishu.cn/wiki/TOKEN"
 
+读取支持 `wiki/TOKEN`、`docx/TOKEN`。旧版文档 `docs/doccn...` 暂不支持，请转为新版 `docx` 后再读取。
+
 **写入文档（覆盖更新）**
 > "帮我把这个方案写到 https://xxx.feishu.cn/wiki/TOKEN"
 
@@ -161,7 +163,7 @@ app_secret=xxxx
 ### 权限不足（forBidden）
 
 检查：
-1. 应用是否已开通 `docx:document` 和 `docx:document:readonly` 权限
+1. 应用是否已开通所需权限：`docx:document` 和 `docx:document:readonly`
 2. 修改权限后是否重新发布了应用版本
 3. 是否重新运行了 `login.py` 授权
 
