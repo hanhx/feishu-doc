@@ -1,3 +1,5 @@
+
+
 # feishu-doc 使用说明
 
 让 AI IDE（如 OpenCode、Claude Code、Windsurf、Cursor 等）直接在终端读写飞书文档，无需打开浏览器。
@@ -89,7 +91,7 @@ export FEISHU_APP_SECRET=xxxx
 
 **方式2：配置文件**
 
-编辑 `assets/.feishu` 填入凭证：
+编辑 `assets/.feishu.local` 填入凭证：
 
 ```
 app_id=cli_xxxx
