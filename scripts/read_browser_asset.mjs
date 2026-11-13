@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { text as readText } from 'node:stream/consumers';
 import { AuthRuntimeError, runBrowserAuth, safeErrorMessage } from './browser_auth.mjs';
 import { visibleBitableRange } from './bitable_grid.mjs';
 
@@ -16,35 +17,66 @@ const PREVIEW = {
 };
 const DOWNLOAD = /^(下载(?:附件|文件)?|Download(?: attachment| file)?)$/i;
 const PERMISSION = /^(申请(?:阅读|访问)?权限|无权访问|暂无访问权限|Request access|Access denied)$/i;
+const LOGIN_HOST = /^(?:accounts|passport|login|auth)\.feishu\.cn$/i;
+const COPY_FALLBACK_CODES = new Set([
+  'AUTO_RANGE_UNAVAILABLE', 'AUTO_RANGE_MISMATCH', 'COPY_UNAVAILABLE', 'INVALID_RANGE',
+]);
 
 function failure(code, message) {
   return new AuthRuntimeError(code, message);
 }
 
-export async function locateBlock(page, url, blockId, timeoutMs) {
+async function waitForDocument(page, url, timeoutMs, detectLogin = false) {
+  const target = current => current.origin === url.origin &&
+    current.pathname.replace(/\/$/, '') === url.pathname.replace(/\/$/, '');
+  const documentReady = async () => {
+    await page.waitForURL(target, { timeout: timeoutMs });
+    const content = page.locator('.docx-page-block').first();
+    const denied = page.getByText(PERMISSION).first();
+    await content.or(denied).first().waitFor({ timeout: 20_000 });
+    if (!(await content.isVisible()) && await denied.isVisible()) {
+      throw failure('DOCUMENT_DENIED', '当前飞书账号没有文档查看权限。');
+    }
+  };
   try {
-    await page.waitForURL((current) => current.origin === url.origin &&
-      current.pathname.replace(/\/$/, '') === url.pathname.replace(/\/$/, ''), { timeout: timeoutMs });
-    await page.locator('.docx-page-block').first().waitFor({ timeout: 20_000 });
-  } catch {
+    if (!detectLogin) return await documentReady();
+    const login = page.waitForURL(current => LOGIN_HOST.test(current.hostname) ||
+      (current.origin === url.origin && /^\/(?:login|passport|accounts)(?:\/|$)/i.test(current.pathname)),
+    { timeout: timeoutMs }).then(() => {
+      throw failure('BROWSER_LOGIN_REQUIRED', '飞书浏览器登录已失效。');
+    });
+    return await Promise.race([documentReady(), login]);
+  } catch (error) {
+    if (error instanceof AuthRuntimeError) throw error;
     if (await page.getByText(PERMISSION).first().isVisible()) {
       throw failure('DOCUMENT_DENIED', '当前飞书账号没有文档查看权限。');
     }
     throw failure('DOCUMENT_UNAVAILABLE', '飞书文档未打开。请检查专用浏览器登录状态及文档权限。');
   }
+}
 
+export async function locateBlock(page, url, blockId, timeoutMs) {
+  await waitForDocument(page, url, timeoutMs);
+  return findBlockOnPage(page, blockId, false);
+}
+
+async function findBlockOnPage(page, blockId, retryFromTop) {
   const block = page.locator(`[data-record-id="${blockId}"], [data-block-id="${blockId}"]`);
   if (!(await block.count())) {
     const viewport = page.viewportSize();
     if (viewport) await page.mouse.move(Math.floor(viewport.width / 2), Math.floor(viewport.height / 2));
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      await page.mouse.wheel(0, 650);
-      try {
-        await block.waitFor({ timeout: 500 });
-        break;
-      } catch {
-        // Long documents mount offscreen blocks as the page scrolls.
+    for (let pass = 0; pass < (retryFromTop ? 2 : 1); pass += 1) {
+      if (pass) await page.mouse.wheel(0, -30 * 650);
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await page.mouse.wheel(0, 650);
+        try {
+          await block.waitFor({ timeout: 500 });
+          break;
+        } catch {
+          // Long documents mount offscreen blocks as the page scrolls.
+        }
       }
+      if (await block.count()) break;
     }
   }
   if (await block.count() !== 1) {
@@ -164,7 +196,11 @@ async function copyBitable(page, block, origin, coordinates, output) {
         await page.evaluate(async ({ items, marker, copiedText }) => {
           const current = await navigator.clipboard.readText();
           if (current !== marker && current !== copiedText) return;
-          await navigator.clipboard.write(items.map(item => new ClipboardItem(item)));
+          if (items.every(item => Object.values(item).every(blob => blob.size === 0))) {
+            await navigator.clipboard.writeText('');
+          } else {
+            await navigator.clipboard.write(items.map(item => new ClipboardItem(item)));
+          }
         }, { items: original, marker, copiedText: copied?.text });
       }
     } catch {
@@ -185,53 +221,116 @@ async function copyBitable(page, block, origin, coordinates, output) {
     columnCount: Math.max(...copied.columnsByRow) };
 }
 
-export async function readBrowserAsset(rawUrl, blockId, type, output, cellRange, run = runBrowserAuth) {
+function documentUrl(rawUrl) {
   const url = new URL(rawUrl);
+  if (url.protocol !== 'https:' || !/^[a-z0-9-]+\.feishu\.cn$/.test(url.host) || url.username || url.password ||
+      url.search || url.hash || !/^\/(?:docx|wiki)\/[a-zA-Z0-9_-]+\/?$/.test(url.pathname)) {
+    throw failure('INVALID_ARGUMENTS', '飞书文档地址无效。');
+  }
+  return url;
+}
+
+function assetJob({ blockId, type, output, cellRange, fallbackOutput }) {
   const isCopy = type === 'bitable' && (!output || /\.tsv$/i.test(output));
   const coordinates = cellRange?.match(CELL_RANGE)?.slice(1).map(Number);
-  if (url.protocol !== 'https:' || !/^[a-z0-9-]+\.feishu\.cn$/.test(url.host) || url.username || url.password ||
-      url.search || url.hash || !/^\/(?:docx|wiki)\/[a-zA-Z0-9_-]+\/?$/.test(url.pathname) ||
-      !ID.test(blockId) || !(type === 'excel' || Object.hasOwn(PREVIEW, type)) ||
+  if (typeof blockId !== 'string' || !ID.test(blockId) || !(type === 'excel' || Object.hasOwn(PREVIEW, type)) ||
       (output ? !path.isAbsolute(output) : !isCopy) || (cellRange && (!isCopy || !coordinates)) ||
-      !(type === 'excel' ? /\.xlsx?$/i.test(output) : isCopy || /\.png$/i.test(output))) {
-    throw failure('INVALID_ARGUMENTS', '飞书文档地址、资源块或输出路径无效。');
+      !(type === 'excel' ? /\.xlsx?$/i.test(output) : isCopy || /\.png$/i.test(output)) ||
+      (fallbackOutput && (!isCopy || !path.isAbsolute(fallbackOutput) || !/\.png$/i.test(fallbackOutput)))) {
+    throw failure('INVALID_ARGUMENTS', '飞书资源块或输出路径无效。');
   }
-  if (output) {
-    try {
-      await fs.lstat(output);
-      throw failure('OUTPUT_EXISTS', '输出文件已存在。');
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
-  }
+  return { blockId, type, output, coordinates, isCopy, fallbackOutput };
+}
 
-  const result = await run({
+async function requireNewOutput(output) {
+  if (!output) return;
+  try {
+    await fs.lstat(output);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  throw failure('OUTPUT_EXISTS', '输出文件已存在。');
+}
+
+async function inDocument(url, acceptDownloads, run, read) {
+  const open = headless => run({
     scope: { platform: 'feishu-doc', environment: url.hostname.split('.')[0], account: 'default' },
     loginUrl: url.href,
     allowedPageOrigins: [url.origin],
-    launchOptions: { acceptDownloads: type === 'excel' },
+    launchOptions: { acceptDownloads, headless },
     authenticate: async ({ page, timeoutMs }) => {
-      if (new URL(page.url()).origin !== url.origin) {
-        process.stderr.write('请在飞书专用 Chrome 窗口完成登录。\n');
-      }
-      try {
-        const block = await locateBlock(page, url, blockId, timeoutMs);
-        if (isCopy) return await copyBitable(page, block, url.origin, coordinates, output);
-        const mode = type === 'excel' ? await downloadExcel(page, block, output) : await capturePreview(block, type, output);
-        return { mode, path: output };
-      } catch (error) {
-        if (error instanceof AuthRuntimeError) throw error;
-        if (error.code === 'EEXIST') throw failure('OUTPUT_EXISTS', '输出文件已存在。');
-        throw failure('ASSET_UNAVAILABLE', '指定块未完成渲染或无法保存，请检查页面是否可以查看此块。');
-      }
+      await waitForDocument(page, url, headless ? 25_000 : timeoutMs, headless);
+      return read(page);
     },
   });
-  return { blockId, type, ...result };
+  try {
+    return await open(true);
+  } catch (error) {
+    if (error.code !== 'BROWSER_LOGIN_REQUIRED') throw error;
+    process.stderr.write('请在飞书专用 Chrome 窗口完成登录，命令随后会继续读取。\n');
+    return open(false);
+  }
+}
+
+async function readAssetOnPage(page, url, job, retryFromTop = false) {
+  const { blockId, type, output, isCopy, coordinates, fallbackOutput } = job;
+  try {
+    const block = await findBlockOnPage(page, blockId, retryFromTop);
+    if (isCopy) {
+      try {
+        const result = await copyBitable(page, block, url.origin, coordinates, output);
+        return { blockId, type, ...result };
+      } catch (error) {
+        if (!fallbackOutput || (error instanceof AuthRuntimeError && !COPY_FALLBACK_CODES.has(error.code)) ||
+            (error.code && !(error instanceof AuthRuntimeError))) throw error;
+        const fallbackReason = error instanceof AuthRuntimeError ? error.code : 'COPY_UNAVAILABLE';
+        const mode = await capturePreview(block, type, fallbackOutput);
+        return { blockId, type, mode, path: fallbackOutput, fallbackReason };
+      }
+    }
+    const mode = type === 'excel' ? await downloadExcel(page, block, output) : await capturePreview(block, type, output);
+    return { blockId, type, mode, path: output };
+  } catch (error) {
+    if (error instanceof AuthRuntimeError) throw error;
+    if (error.code === 'EEXIST') throw failure('OUTPUT_EXISTS', '输出文件已存在。');
+    throw failure('ASSET_UNAVAILABLE', '指定块未完成渲染或无法保存，请检查页面是否可以查看此块。');
+  }
+}
+
+export async function readBrowserAsset(rawUrl, blockId, type, output, cellRange, run = runBrowserAuth) {
+  const url = documentUrl(rawUrl);
+  const job = assetJob({ blockId, type, output, cellRange });
+  await requireNewOutput(output);
+  return inDocument(url, type === 'excel', run, page => readAssetOnPage(page, url, job));
+}
+
+export async function readBrowserAssets(rawUrl, requests, run = runBrowserAuth) {
+  const url = documentUrl(rawUrl);
+  const jobs = requests.map(assetJob);
+  if (!jobs.length) return [];
+  return inDocument(url, jobs.some(job => job.type === 'excel'), run, async page => {
+    const results = [];
+    for (const job of jobs) {
+      try {
+        await requireNewOutput(job.output);
+        results.push(await readAssetOnPage(page, url, job, true));
+      } catch (error) {
+        results.push({ blockId: job.blockId, type: job.type,
+          error: { code: error.code || 'ASSET_UNAVAILABLE', message: safeErrorMessage(error) } });
+      }
+    }
+    return results;
+  });
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
-    console.log(JSON.stringify(await readBrowserAsset(...process.argv.slice(2))));
+    const [modeOrUrl, ...args] = process.argv.slice(2);
+    const result = modeOrUrl === '--batch'
+      ? await readBrowserAssets(args[0], JSON.parse(await readText(process.stdin)))
+      : await readBrowserAsset(modeOrUrl, ...args);
+    console.log(JSON.stringify(result));
   } catch (error) {
     console.error(`❌ ${safeErrorMessage(error)}`);
     process.exitCode = 1;

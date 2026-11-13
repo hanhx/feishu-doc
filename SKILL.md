@@ -42,13 +42,22 @@ description: Reads and writes Feishu wiki and docx. Supports native tables, Merm
 python3 scripts/index.py read "<Feishu_URL>"
 ```
 
-**按需读取资源**：先用 `read` 定位 `assets`。正文已经足够，或清单为空时，直接使用正文结果。需要资源内容时，只选择任务涉及的 `blockId`：
+**批量读取正文和内嵌资源**：当任务需要同一篇文档的多个资源时，一次读取并共用一个 Chrome 页面。省略 `--block-id` 会读取所有受支持的资源，也可以重复传入 `--block-id` 限定范围。
+
+```bash
+python3 scripts/index.py read "<Feishu_URL>" --with-assets
+python3 scripts/index.py read "<Feishu_URL>" --with-assets --block-id <ID1> --block-id <ID2>
+```
+
+文件默认保存在私有临时目录，也可用 `--output-dir <已有目录>` 指定。JSON 的 `assetResults` 记录各块的输出路径、读取方式或错误。多维表格优先复制可见单元格为 TSV，复制不可用时在同一页尝试截图，结果带 `fallbackReason`。有资源失败时仍输出正文和其他块的结果，退出码为 1。没有可读资源时无需启动 Chrome。
+
+**单独读取资源**：用 `read` 返回的 `assets` 定位目标 `blockId`，再运行 `read-asset`。正文足够时直接使用正文结果。
 
 ```bash
 python3 scripts/index.py read-asset "<Feishu_URL>" --block-id "<blockId>" --output /path/to/new-file.png
 ```
 
-`read-asset` 通过现有文档 API 核对块，然后使用飞书专用 Chrome Profile。首次需要时在窗口手动登录，后续复用。浏览器操作需要 macOS 或 Linux、Node.js 20+ 和系统 Chrome。首次使用前在 Skill 根目录执行 `npm ci`。操作沿用飞书页面查看或下载权限。
+资源读取沿用飞书页面的查看或下载权限，并使用专用 Chrome Profile。默认在后台运行，检测到飞书登录页时打开窗口，手动登录后同一条命令继续。浏览器操作需要 macOS 或 Linux、Node.js 20+ 和系统 Chrome。首次使用前在 Skill 根目录执行 `npm ci`。
 
 - 图片和画板用 `.png` 获取可见截图，`mode` 为 `visible-preview`。内嵌电子表格也支持这种读取。画板和表格预览仅覆盖页面已渲染的内容。
 - 多维表格默认自动定位当前网格中可见的数据单元格，复制为 TSV，`mode` 为 `clipboard`。用户只需给出文档链接和目标表。用 `read` 返回的 `assets`，结合章节、表格占位和顺序确定唯一的 `blockId`。省略 `--output` 时保存到私有临时目录，返回 `path`、`rowCount` 和 `columnCount`。可用 `.tsv` 路径指定保存位置。输出保留单元格文本和空值，范围受当前视图和可见行列限制。复制使用飞书页面权限，完成后恢复原剪贴板。

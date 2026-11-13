@@ -89,9 +89,15 @@ python3 scripts/index.py sync "https://example.feishu.cn/wiki/EXAMPLE_TOKEN" des
 
 ## 读取附件和导入画板
 
-在 macOS 或 Linux 上准备 Node.js 20+ 和 Google Chrome，然后在 Skill 根目录执行 `npm ci`。首次启动 Chrome 时，按提示登录有对应文档权限的飞书账号。
+在 macOS 或 Linux 上准备 Node.js 20+ 和 Google Chrome，然后在 Skill 根目录执行 `npm ci`。读取资源时 Chrome 默认在后台运行，检测到飞书登录页才打开窗口。登录后同一条命令继续。
 
-先运行 `read`，从 `assets` 中找到目标资源的 `blockId`。可保存图片、画板或内嵌表格的可见预览，下载 Excel 附件，或将多维表格当前视图的可见数据导出为 TSV。
+需要同时读取正文和多个资源时，使用 `read --with-assets`。它在同一个 Chrome 页面中读取资源，并在 JSON 的 `assetResults` 中返回各块的结果和输出路径。可重复传入 `--block-id` 限定范围。
+
+```bash
+python3 scripts/index.py read "https://example.feishu.cn/wiki/EXAMPLE_TOKEN" --with-assets
+```
+
+单独读取资源时，从 `read` 返回的 `assets` 中找到目标 `blockId`。可保存图片、画板或内嵌表格的可见预览，下载 Excel 附件，或将多维表格当前视图的可见数据导出为 TSV。
 
 ```bash
 python3 scripts/index.py read-asset "https://example.feishu.cn/wiki/EXAMPLE_TOKEN" \

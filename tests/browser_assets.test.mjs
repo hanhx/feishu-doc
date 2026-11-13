@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { chromium } from 'playwright-core';
-import { readBrowserAsset } from '../scripts/read_browser_asset.mjs';
+import { readBrowserAsset, readBrowserAssets } from '../scripts/read_browser_asset.mjs';
 
 const docUrl = 'https://fixture.feishu.cn/docx/sample';
 
@@ -117,6 +117,67 @@ test('browser reads the specified blocks and uses the visible Excel download', a
   } finally {
     await page.evaluate(text => navigator.clipboard.writeText(text), originalClipboard);
   }
+
+  let sessions = 0;
+  const navigationsBeforeBatch = expectedRequests.filter(request => request === '/docx/sample').length;
+  const preview = path.join(directory, 'batch-table.png');
+  const tableOutput = path.join(directory, 'batch-table.tsv');
+  const batchJobs = [
+    { blockId: 'picture', type: 'image', output: path.join(directory, 'batch-image.png') },
+    { blockId: 'denied', type: 'bitable', output: path.join(directory, 'batch-denied.png') },
+    { blockId: 'table', type: 'bitable', output: tableOutput, cellRange: '10,10:95,50', fallbackOutput: preview },
+    { blockId: 'board', type: 'whiteboard', output: path.join(directory, 'batch-board.png') },
+  ];
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  let batch;
+  try {
+    batch = await readBrowserAssets(docUrl, batchJobs, async options => {
+      sessions += 1;
+      assert.equal(options.launchOptions.headless, true);
+      return run(options);
+    });
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), '');
+  } finally {
+    await page.evaluate(text => navigator.clipboard.writeText(text), originalClipboard);
+  }
+  assert.equal(sessions, 1);
+  assert.equal(expectedRequests.filter(request => request === '/docx/sample').length - navigationsBeforeBatch, 1);
+  assert.deepEqual(batch.map(result => result.mode || result.error.code), [
+    'visible-preview', 'ASSET_DENIED', 'visible-preview', 'visible-preview',
+  ]);
+  assert.equal(batch[2].fallbackReason, 'COPY_UNAVAILABLE');
+  await fs.access(preview);
+  await assert.rejects(fs.access(tableOutput), { code: 'ENOENT' });
   assert.equal(expectedRequests.filter((request) => request === '/workbook').length, 1);
   assert.ok(expectedRequests.every((request) => ['/docx/sample', '/workbook'].includes(request)));
+});
+
+test('a Feishu login redirect reopens visibly and resumes the same batch', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'feishu-assets-login-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  const loginUrl = 'https://accounts.feishu.cn/accounts/page/login';
+  const launches = [];
+  let authorized = false;
+  await page.route('https://fixture.feishu.cn/**', route => authorized
+    ? route.fulfill({ contentType: 'text/html', body: `<main class="docx-page-block"><div data-record-id="board"><div class="whiteboard-canvas-container"><canvas></canvas></div></div></main>` })
+    : route.fulfill({ status: 302, headers: { location: loginUrl } }));
+  await page.route('https://accounts.feishu.cn/**', route => route.fulfill({ body: 'Login page' }));
+
+  const results = await readBrowserAssets(docUrl, [
+    { blockId: 'board', type: 'whiteboard', output: path.join(directory, 'board.png') },
+  ], async ({ launchOptions, authenticate }) => {
+    launches.push(launchOptions.headless);
+    await page.goto(docUrl);
+    assert.equal(new URL(page.url()).hostname, new URL(loginUrl).hostname);
+    if (launchOptions.headless) return authenticate({ page, timeoutMs: 500 });
+    const reading = authenticate({ page, timeoutMs: 5000 });
+    authorized = true;
+    await page.goto(docUrl);
+    return reading;
+  });
+  assert.deepEqual(launches, [true, false]);
+  assert.equal(results[0].mode, 'visible-preview');
 });

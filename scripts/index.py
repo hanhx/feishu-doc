@@ -30,6 +30,7 @@ def usage():
     print("  action       操作类型：read | read-asset | import-drawio | write | append | clear | insert-targeted | delete-section | snapshot | sync")
     print("  Feishu_URL   飞书文档地址，如 https://xxx.feishu.cn/wiki/TOKEN")
     print("  content_file 写入时的内容文件路径（write/append/insert-targeted 模式必填）")
+    print("  read         <Feishu_URL> [--with-assets [--block-id <ID>]... [--output-dir <目录>]]")
     print("  read-asset   <Feishu_URL> --block-id <ID> [--output <本地文件>] [--range X1,Y1:X2,Y2]")
     print("  import-drawio <Feishu_URL> <图.drawio> (--anchor <章节标题> | --append | --replace-block-id <ID>) --output <截图.png> [--yes]")
     print()
@@ -337,7 +338,17 @@ def process(action, doc_url, access_token, doc_type, token, content_file="", opt
             db.block_to_md,
             db.collect_descendant_ids,
         )
+        failed = False
+        if options and options.with_assets:
+            try:
+                out["assetResults"] = ba.read_assets(out["assets"], options)
+                failed = any("error" in result for result in out["assetResults"])
+            except ba.AssetReadError as error:
+                out["assetReadError"] = str(error)
+                failed = True
         print(json.dumps(out, ensure_ascii=False, indent=2))
+        if failed:
+            raise SystemExit(1)
 
     elif action == "read-asset":
         try:
@@ -606,7 +617,9 @@ def main():
     content_file = ""
     options = {}
 
-    if action in ("write", "append"):
+    if action == "read":
+        options = ba.parse_read_options(doc_url, args_after_url)
+    elif action in ("write", "append"):
         content_file = args_after_url[0] if args_after_url else ""
     elif action == "insert-targeted":
         pos, options = ops.parse_cli_options(args_after_url)
