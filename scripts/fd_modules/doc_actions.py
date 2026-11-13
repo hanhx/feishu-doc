@@ -2,7 +2,10 @@ import json
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from . import doc_blocks, native_tables, targeted_ops
+
+
+ASSET_TYPES = {18: "bitable", 23: "file", 27: "image", 30: "sheet", 43: "whiteboard"}
 
 
 def handle_read(doc_url, doc_type, doc_token, access_token, api_call, check_resp, block_to_md, collect_descendant_ids):
@@ -19,22 +22,7 @@ def handle_read(doc_url, doc_type, doc_token, access_token, api_call, check_resp
     data = check_resp(resp, action_name, auto_retry_login=True)
     content = data.get("content", "")
 
-    items = []
-    page_token = ""
-    while True:
-        url = f"/docx/v1/documents/{doc_token}/blocks?page_size=500"
-        if page_token:
-            url += f"&page_token={page_token}"
-        resp2 = api_call("GET", url, access_token)
-        blocks_data = resp2.get("data", {}) if resp2.get("code", -1) == 0 else {}
-        items.extend(blocks_data.get("items", []))
-        if not blocks_data.get("has_more", False):
-            break
-        page_token = blocks_data.get("page_token", "")
-        if not page_token:
-            break
-
-    block_map = {it.get("block_id"): it for it in items if it.get("block_id")}
+    items, block_map = targeted_ops.fetch_all_blocks(doc_token, access_token, api_call, check_resp)
     skip_block_ids = set()
     for it in items:
         btype = it.get("block_type", 0)
@@ -50,10 +38,36 @@ def handle_read(doc_url, doc_type, doc_token, access_token, api_call, check_resp
                 skip_block_ids.update(collect_descendant_ids(child_id, block_map))
 
     md_lines = []
-    for item in items:
+    assets = []
+    headings = []
+    for block_index, item in enumerate(items, start=1):
         block_id = item.get("block_id", "")
+        block_type = item.get("block_type")
+        asset_type = ASSET_TYPES.get(block_type)
+        if asset_type and block_id and "divider" not in item:
+            asset = {
+                "type": asset_type,
+                "blockId": block_id,
+                "blockIndex": block_index,
+                "sectionPath": [title for _, title in headings],
+            }
+            file_data = item.get("file")
+            if asset_type == "file" and isinstance(file_data, dict):
+                name = file_data.get("name")
+                if isinstance(name, str) and name.strip():
+                    asset["name"] = name
+                    if name.strip().lower().endswith((".xlsx", ".xls")):
+                        asset["type"] = "excel"
+            assets.append(asset)
         if block_id and block_id in skip_block_ids:
             continue
+        level = targeted_ops.heading_level(item)
+        if level is not None:
+            while headings and headings[-1][0] >= level:
+                headings.pop()
+            heading = targeted_ops.heading_text(item, doc_blocks.extract_text)
+            if heading:
+                headings.append((level, heading))
         line = block_to_md(item, block_map)
         if line is not None:
             md_lines.append(line)
@@ -71,6 +85,7 @@ def handle_read(doc_url, doc_type, doc_token, access_token, api_call, check_resp
         "blockCount": len(items),
         "markdown": markdown,
         "rawContent": content,
+        "assets": assets,
     }
 
 
@@ -128,7 +143,6 @@ def handle_write_append(action, doc_url, doc_token, access_token, content_file, 
     make_ordered_block = helpers["make_ordered_block"]
     make_quote_block = helpers["make_quote_block"]
     make_text_block = helpers["make_text_block"]
-    make_plain_elements = helpers["make_plain_elements"]
     make_text_elements = helpers["make_text_elements"]
 
     with open(content_file, "r", encoding="utf-8") as f:
@@ -262,8 +276,6 @@ def handle_write_append(action, doc_url, doc_token, access_token, content_file, 
                     lang = "java"
                 elif ct.startswith("{") or ct.startswith("["):
                     lang = "json"
-                elif any(k in ct for k in ["flowchart", "sequenceDiagram", "stateDiagram", "erDiagram", "gantt"]):
-                    lang = "mermaid"
                 elif any(k in ct for k in ["GET /", "POST /", "PUT /", "DELETE /"]):
                     lang = "bash"
             children.append(make_code_block(code_text, lang))
@@ -321,112 +333,13 @@ def handle_write_append(action, doc_url, doc_token, access_token, content_file, 
             children.append(make_quote_block("\n".join(quote_lines)))
             continue
 
-        if stripped.startswith("|") and i + 1 < len(lines) and re.match(r"^\s*\|[\s\-:|]+\|?\s*$", lines[i + 1]):
-            table_lines = []
-            while i < len(lines) and lines[i].strip().startswith("|"):
-                table_lines.append(lines[i].strip())
-                i += 1
-            if len(table_lines) >= 2:
-                header_cells = [c.strip() for c in table_lines[0].split("|") if c.strip()]
-                data_rows = []
-                for row_line in table_lines[2:]:
-                    cells = [c.strip() for c in row_line.split("|") if c.strip()]
-                    data_rows.append(cells)
-                col_size = len(header_cells)
-                all_rows_for_width = [header_cells] + data_rows
-                col_max_len = [0] * col_size
-                for row_cells in all_rows_for_width:
-                    for ci in range(min(len(row_cells), col_size)):
-                        col_max_len[ci] = max(col_max_len[ci], len(row_cells[ci]))
-                total_len = max(sum(col_max_len), 1)
-                total_width = 700
-                col_widths = [max(100, int(total_width * cl / total_len)) for cl in col_max_len]
-
-                flush_blocks(children)
-                children = []
-                max_data_rows = 8
-
-                def create_and_fill_table(h_cells, d_rows, c_size, c_widths):
-                    sub_row_size = 1 + len(d_rows)
-                    tb = {
-                        "block_type": 31,
-                        "table": {
-                            "property": {
-                                "row_size": sub_row_size,
-                                "column_size": c_size,
-                                "column_width": c_widths,
-                                "header_row": True,
-                            },
-                        },
-                    }
-                    tr = api_call(
-                        "POST",
-                        f"/docx/v1/documents/{doc_token}/blocks/{page_block_id}/children",
-                        access_token,
-                        {"children": [tb], "index": -1},
-                    )
-                    if tr.get("code", -1) != 0:
-                        print(
-                            f"⚠️ 表格创建失败({sub_row_size}x{c_size}), fallback: {tr.get('msg', '')[:80]}",
-                            file=sys.stderr,
-                        )
-                        return False
-                    counter[0] += 1
-                    tc = tr.get("data", {}).get("children", [])
-                    if tc:
-                        cids = tc[0].get("table", {}).get("cells", [])
-                        a_rows = [h_cells] + d_rows
-
-                        def fill_cell(args):
-                            cell_id, text, is_header = args
-                            el = make_plain_elements(text) if is_header else make_text_elements(text)
-                            get_resp = api_call("GET", f"/docx/v1/documents/{doc_token}/blocks/{cell_id}", access_token)
-                            auto_children = get_resp.get("data", {}).get("block", {}).get("children", [])
-
-                            if auto_children:
-                                first_child_id = auto_children[0]
-                                api_call(
-                                    "PATCH",
-                                    f"/docx/v1/documents/{doc_token}/blocks/{first_child_id}",
-                                    access_token,
-                                    {"update_text_elements": {"elements": el}},
-                                )
-                                for child_id in auto_children[1:]:
-                                    api_call("DELETE", f"/docx/v1/documents/{doc_token}/blocks/{child_id}", access_token)
-                            else:
-                                cell_block = {"block_type": 2, "text": {"elements": el}}
-                                api_call(
-                                    "POST",
-                                    f"/docx/v1/documents/{doc_token}/blocks/{cell_id}/children",
-                                    access_token,
-                                    {"children": [cell_block], "index": -1},
-                                )
-                            time.sleep(0.02)
-
-                        num_workers = 5
-                        tasks = []
-                        for ri, rc in enumerate(a_rows):
-                            for ci2 in range(c_size):
-                                cidx = ri * c_size + ci2
-                                if cidx >= len(cids):
-                                    break
-                                ct = rc[ci2] if ci2 < len(rc) else ""
-                                tasks.append((cids[cidx], ct, ri == 0))
-
-                        for batch_start in range(0, len(tasks), num_workers):
-                            batch = tasks[batch_start:batch_start + num_workers]
-                            with ThreadPoolExecutor(max_workers=num_workers) as pool:
-                                futures = [pool.submit(fill_cell, task) for task in batch]
-                                for future in futures:
-                                    future.result()
-                    time.sleep(0.5)
-                    return True
-
-                for chunk_start in range(0, len(data_rows), max_data_rows):
-                    chunk = data_rows[chunk_start:chunk_start + max_data_rows]
-                    if not create_and_fill_table(header_cells, chunk, col_size, col_widths):
-                        children.append(make_code_block("\n".join(table_lines), "markdown"))
-                        break
+        parsed_table = native_tables.parse_table(lines, i)
+        if parsed_table:
+            table, i = parsed_table
+            flush_blocks(children)
+            children = []
+            native_tables.write_table(doc_token, access_token, page_block_id, -1, table["_native_table"], api_call)
+            counter[0] += 1
             continue
 
         if not line.strip():

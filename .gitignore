@@ -1,8 +1,9 @@
 .DS_Store
 .idea/
-assets/.token_cache
-assets/.user_token_cache
-assets/.feishu.local
+assets/.token_cache*
+assets/.user_token_cache*
+assets/.feishu.local*
+node_modules/
 
 # Python
 __pycache__/

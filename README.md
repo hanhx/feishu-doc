@@ -89,7 +89,7 @@ export FEISHU_APP_SECRET=xxxx
 
 **方式2：配置文件**
 
-编辑 `assets/.feishu` 填入凭证：
+将 `assets/.feishu.example` 复制为 `assets/.feishu.local` 后，在本机填写凭证。
 
 ```
 app_id=cli_xxxx
@@ -132,13 +132,17 @@ app_secret=xxxx
 - 无序列表、有序列表
 - 待办事项（`- [ ]` / `- [x]`）
 - 引用（渲染为飞书 Callout 容器）
-- 表格（自动拆分为飞书原生表格，每个子表最多 8 行数据 + 1 行表头，大表格无缝支持）
+- 表格（一个 Markdown 表对应一张飞书原生表格，长表通过追加行写入）
 - 分割线
 - 行内样式：**加粗**、`行内代码`、~~删除线~~、[超链接](url)
 
 ---
 
 ## 高级能力（无需记命令）
+
+使用 `snapshot` / `sync` 保存原生块基线、预览差异。获得写入授权后，可以仅更新变化的正文和同结构表格单元格。`write` 仍用于整篇覆盖。命令和恢复步骤见 [差异更新说明](references/diff-sync.md)。
+
+飞书原生 Mermaid 文本绘图可随正文写入。还可以读取内嵌附件，或把 draw.io 源文件导入飞书画板。附件读取和画板导入需要 macOS 或 Linux、Node.js 20+ 和系统 Chrome。首次使用前，在 Skill 根目录执行 `npm ci`。命令和权限说明见 [Skill 指南](SKILL.md)。
 
 下面这些能力，直接在 AI IDE 里用自然语言描述即可：
 
@@ -176,7 +180,7 @@ python3 scripts/login.py logout && python3 scripts/login.py
 
 ### 表格超过 9 行
 
-飞书 API 限制单次创建表格最多 9 行。超过 9 行的表格会自动拆分为多个子表格，每个子表最多 8 行数据 + 1 行表头，均为飞书原生表格渲染。如果子表创建失败，会自动 fallback 为 markdown 代码块展示。
+`write`、`append` 和 `insert-targeted` 先创建最多 9 行（含表头），再调用 `insert_table_row` 在同一个表格块末尾补齐其余行，最后填充单元格。表格写入失败时会停止，请先回读文档确认已写入的内容再处理。
 
 ---
 

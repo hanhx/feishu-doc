@@ -1,0 +1,4 @@
+# 复制为 .feishu.local 后在本机填写，或通过 FEISHU_APP_ID / FEISHU_APP_SECRET 注入。
+# 此样例不含凭据；真实配置和登录缓存不得提交。
+app_id=
+app_secret=

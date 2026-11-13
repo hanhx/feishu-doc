@@ -1,4 +1,8 @@
+import json
 import re
+
+
+MERMAID_COMPONENT_TYPE_ID = "blk_631fefbbae02400430b8f9f4"
 
 
 def extract_text(elements):
@@ -159,13 +163,17 @@ def block_to_md(block, block_map=None):
         done = todo.get("style", {}).get("done", False)
         return f"- [{'x' if done else ' '}] " + extract_text(todo.get("elements", []))
     elif btype == 23:
-        return "---"
+        return "---" if "divider" in block else "[文件]"
     elif btype == 22:
         if "divider" in block:
             return "---"
         return table_block_to_md(block, block_map or {})
     elif btype == 27:
         return "[图片]"
+    elif btype == 30:
+        return "[电子表格]"
+    elif btype == 43:
+        return "[画板]"
     elif btype == 31 and isinstance(block.get("table"), dict):
         return table_block_to_md(block, block_map or {})
     elif btype == 18:
@@ -174,6 +182,17 @@ def block_to_md(block, block_map=None):
         return "[分栏]"
     elif btype == 19:
         return callout_block_to_md(block, block_map or {})
+    elif btype == 40:
+        add_on = block.get("add_ons")
+        if isinstance(add_on, dict) and add_on.get("component_type_id") == MERMAID_COMPONENT_TYPE_ID:
+            record = add_on.get("record")
+            if isinstance(record, str):
+                try:
+                    payload = json.loads(record)
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict) and isinstance(payload.get("data"), str):
+                    return f"```mermaid\n{payload['data']}\n```"
     return extract_block_text(block)
 
 
@@ -277,6 +296,22 @@ def make_code_block(code_text, lang=""):
         "code": {
             "elements": make_plain_elements(code_text),
             "style": {"language": lang_code},
+        },
+    }
+
+
+def make_markdown_code_block(code_text, lang=""):
+    if lang.lower() != "mermaid":
+        return make_code_block(code_text, lang)
+
+    return {
+        "block_type": 40,
+        "add_ons": {
+            "component_type_id": MERMAID_COMPONENT_TYPE_ID,
+            "record": json.dumps(
+                {"data": code_text, "theme": "default", "view": "chart"},
+                ensure_ascii=False,
+            ),
         },
     }
 

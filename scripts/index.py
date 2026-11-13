@@ -11,6 +11,10 @@ import urllib.error
 from fd_modules import doc_actions as da
 from fd_modules import doc_blocks as db
 from fd_modules import targeted_ops as ops
+from fd_modules import diff_sync as ds
+from fd_modules import browser_assets as ba
+from fd_modules import drawio_import as di
+from fd_modules.native_tables import NativeTableError
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FEISHU_FILE = os.path.join(SCRIPT_DIR, "..", "assets", ".feishu")
@@ -23,9 +27,11 @@ API_BASE = "https://open.feishu.cn/open-apis"
 def usage():
     print(f"用法: {sys.argv[0]} <action> <Feishu_URL> [content_file] [--options]")
     print()
-    print("  action       操作类型：read | write | append | clear | insert-targeted | delete-section")
+    print("  action       操作类型：read | read-asset | import-drawio | write | append | clear | insert-targeted | delete-section | snapshot | sync")
     print("  Feishu_URL   飞书文档地址，如 https://xxx.feishu.cn/wiki/TOKEN")
     print("  content_file 写入时的内容文件路径（write/append/insert-targeted 模式必填）")
+    print("  read-asset   <Feishu_URL> --block-id <ID> [--output <本地文件>] [--range X1,Y1:X2,Y2]")
+    print("  import-drawio <Feishu_URL> <图.drawio> (--anchor <章节标题> | --append | --replace-block-id <ID>) --output <截图.png> [--yes]")
     print()
     print("定点插入：")
     print(
@@ -37,6 +43,11 @@ def usage():
     print("删除章节：")
     print("  python3 scripts/index.py delete-section <Feishu_URL> --anchor \"章节名\" --match fuzzy|regex [--yes]")
     print("  说明：先删子章节/内容，最后删标题；默认先预览并要求输入 yes")
+    print()
+    print("差异更新（默认预览，显式 --apply 才写入）：")
+    print("  python3 scripts/index.py snapshot <Feishu_URL> baseline.json")
+    print("  python3 scripts/index.py sync <Feishu_URL> desired.md --baseline baseline.json [--dry-run]")
+    print("  python3 scripts/index.py sync <Feishu_URL> desired.md --baseline baseline.json --apply --state run.json")
     print()
     print("认证方式（优先级从高到低）：")
     print("  1. user_access_token：先运行 login.py 授权")
@@ -305,6 +316,16 @@ def process(action, doc_url, access_token, doc_type, token, content_file="", opt
     doc_token = token
     options = options or {}
 
+    if action in ("snapshot", "sync"):
+        try:
+            out = ds.run(action, doc_type, token, access_token, options, api_call)
+        except (ds.SyncError, OSError, ValueError) as error:
+            # No access tokens, HTTP response bodies or document contents in diagnostics.
+            print("❌ %s 失败：%s" % (action, str(error) if isinstance(error, ds.SyncError) else type(error).__name__), file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return
+
     if action == "read":
         out = da.handle_read(
             doc_url,
@@ -316,6 +337,23 @@ def process(action, doc_url, access_token, doc_type, token, content_file="", opt
             db.block_to_md,
             db.collect_descendant_ids,
         )
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+
+    elif action == "read-asset":
+        try:
+            out = ba.read_asset(doc_token, access_token, options, api_call, check_resp)
+        except ba.AssetReadError as error:
+            print(f"❌ {error}", file=sys.stderr)
+            raise SystemExit(1)
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+
+    elif action == "import-drawio":
+        import_options, url = options
+        try:
+            out = di.import_drawio(doc_token, access_token, import_options, url, api_call, check_resp)
+        except di.DrawioImportError as error:
+            print(f"❌ {error}", file=sys.stderr)
+            raise SystemExit(1)
         print(json.dumps(out, ensure_ascii=False, indent=2))
 
     elif action == "clear":
@@ -355,7 +393,7 @@ def process(action, doc_url, access_token, doc_type, token, content_file="", opt
         block_list = ops.parse_markdown_for_targeted_insert(
             content,
             db.make_heading_block,
-            db.make_code_block,
+            db.make_markdown_code_block,
             db.make_divider_block,
             db.make_todo_block,
             db.make_bullet_block,
@@ -428,7 +466,6 @@ def process(action, doc_url, access_token, doc_type, token, content_file="", opt
             api_call,
             check_resp,
             db.make_text_elements,
-            db.make_plain_elements,
         )
         out = {
             "docUrl": doc_url,
@@ -545,14 +582,13 @@ def process(action, doc_url, access_token, doc_type, token, content_file="", opt
                 "api_call": api_call,
                 "check_resp": check_resp,
                 "make_heading_block": db.make_heading_block,
-                "make_code_block": db.make_code_block,
+                "make_code_block": db.make_markdown_code_block,
                 "make_divider_block": db.make_divider_block,
                 "make_todo_block": db.make_todo_block,
                 "make_bullet_block": db.make_bullet_block,
                 "make_ordered_block": db.make_ordered_block,
                 "make_quote_block": db.make_quote_block,
                 "make_text_block": db.make_text_block,
-                "make_plain_elements": db.make_plain_elements,
                 "make_text_elements": db.make_text_elements,
             },
         )
@@ -577,13 +613,19 @@ def main():
         content_file = pos[0] if pos else ""
     elif action == "delete-section":
         _, options = ops.parse_cli_options(args_after_url)
+    elif action in ("snapshot", "sync"):
+        options = ds.parse_options(action, args_after_url)
+    elif action == "read-asset":
+        options = ba.parse_options(doc_url, args_after_url)
+    elif action == "import-drawio":
+        options = di.parse_options(doc_url, args_after_url)
 
     if not doc_url:
         usage()
 
-    if action not in ("read", "write", "append", "clear", "insert-targeted", "delete-section"):
+    if action not in ("read", "read-asset", "import-drawio", "write", "append", "clear", "insert-targeted", "delete-section", "snapshot", "sync"):
         print(
-            f"❌ 不支持的操作: {action}，请使用 read / write / append / clear / insert-targeted / delete-section",
+            f"❌ 不支持的操作: {action}，请查看命令用法",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -653,7 +695,11 @@ def main():
             sys.exit(1)
 
     # 执行操作
-    process(action, doc_url, access_token, doc_type, token, content_file, options)
+    try:
+        process(action, doc_url, access_token, doc_type, token, content_file, options)
+    except NativeTableError as error:
+        print(f"❌ {error}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
