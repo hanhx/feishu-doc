@@ -1,274 +1,114 @@
-# feishu-doc 使用说明
+# feishu-doc
 
-让 AI IDE（如 OpenCode、Claude Code、Windsurf、Cursor 等）直接在终端读写飞书文档，无需打开浏览器。
+让 AI 助手读取和更新飞书新版文档。支持将正文读成 Markdown、按章节插入内容、预览并应用差异、写入原生长表格和可编辑 Mermaid。也可以读取文档里的附件与画板，或将 draw.io 文件导入飞书画板。
 
-**下载地址**：https://github.com/hanhx/feishu-doc
-
----
+正文读写使用飞书开放平台 API。资源读取和画板导入还会使用独立的 Chrome 登录会话。
 
 ## 快速开始
 
 ### 1. 安装
 
-支持三种安装方式：**AI 安装（推荐）**、**手动安装**、**软链接**。
-
-#### 方式 1：AI 安装（推荐）
-
-直接在 AI IDE 中告诉 AI 助手：
-
-> "帮我安装 feishu-doc skill，仓库地址是 https://github.com/hanhx/feishu-doc"
-
-AI 会自动识别当前 IDE 并安装到正确的目录。
-
-#### 方式 2：手动安装
-
-根据你使用的 AI IDE，选择对应的命令：
-
-**OpenCode**
-```bash
-git clone https://github.com/hanhx/feishu-doc.git ~/.opencode/skills/feishu-doc
-```
-
-**Claude Code**
-```bash
-git clone https://github.com/hanhx/feishu-doc.git ~/.claude/skills/feishu-doc
-```
-
-**Windsurf**
-```bash
-git clone https://github.com/hanhx/feishu-doc.git ~/.codeium/windsurf/skills/feishu-doc
-```
-
-**Cursor**
-```bash
-git clone https://github.com/hanhx/feishu-doc.git ~/.cursor/skills/feishu-doc
-```
-
-安装完成后，AI IDE 会自动识别 `SKILL.md` 并加载该 skill。
-
-#### 方式 3：软链接
-
-如果你已经克隆到其他位置，可以创建软链接：
+需要 Git 和 Python 3。使用 Codex 时，可以安装到个人 Skills 目录：
 
 ```bash
-# OpenCode
-ln -s /path/to/feishu-doc ~/.opencode/skills/feishu-doc
-
-# Claude Code
-ln -s /path/to/feishu-doc ~/.claude/skills/feishu-doc
-
-# Windsurf
-ln -s /path/to/feishu-doc ~/.codeium/windsurf/skills/feishu-doc
-
-# Cursor
-ln -s /path/to/feishu-doc ~/.cursor/skills/feishu-doc
+git clone https://github.com/hanhx/feishu-doc.git ~/.agents/skills/feishu-doc
+cd ~/.agents/skills/feishu-doc
 ```
 
-> **💡 提示**：
-> - 不同 IDE 版本的 skills 目录可能不同，请以对应 IDE 官方文档为准
-> - 如果下载 zip 包，解压后文件夹名为 `feishu-doc-main`，需重命名为 `feishu-doc` 或创建软链接
+| 工具 | 个人 Skill 安装目录 |
+| --- | --- |
+| [Codex](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills) | `~/.agents/skills/feishu-doc` |
+| [Claude Code](https://code.claude.com/docs/en/skills) | `~/.claude/skills/feishu-doc` |
+| [OpenCode](https://opencode.ai/docs/skills) | `~/.config/opencode/skills/feishu-doc` |
+| [Cursor](https://cursor.com/docs/skills) | `~/.cursor/skills/feishu-doc` |
 
-### 2. 配置 App ID 和 App Secret
+按所用工具选择一个安装目录。已有本地检出时，也可以在支持软链接的工具中将安装目录指向它。手动安装时，保留整个目录，确保 `SKILL.md`、`scripts/` 和 `assets/` 同级。也可以把仓库地址发给 AI 助手，请它安装到当前工具的 Skills 目录。
 
-> 💡 **推荐**：直接联系作者获取已注册好的 App ID 和 App Secret，无需自己创建应用。
-> 
-> 如需自己申请，参考 [附录：自建飞书应用](#附录自建飞书应用)。
+### 2. 配置飞书应用并登录
 
-支持两种配置方式，**环境变量优先**：
+在[飞书开放平台](https://open.feishu.cn/app)创建或选用已获授权的企业自建应用。
 
-**方式1：环境变量（推荐）**
-
-在 `~/.zshrc`（Mac 默认）或 `~/.bash_profile` 中添加：
+1. 按需申请文档读取权限 `docx:document:readonly` 和编辑权限 `docx:document`。使用 `/wiki/…` 链接时，还需要应用具备[获取知识空间节点信息](https://open.feishu.cn/document/server-docs/docs/wiki-v2/space-node/get_node)所需的权限。
+2. 在应用的安全设置中添加重定向 URL `http://127.0.0.1:9999/callback`，发布包含这些设置的应用版本。
+3. 在 Skill 根目录复制配置样例，在本机填写应用的 App ID 和 App Secret，然后完成浏览器授权。
 
 ```bash
-export FEISHU_APP_ID=cli_xxxx
-export FEISHU_APP_SECRET=xxxx
-```
-
-保存后执行 `source ~/.zshrc` 生效。
-
-**方式2：配置文件**
-
-将 `assets/.feishu.example` 复制为 `assets/.feishu.local` 后，在本机填写凭证。
-
-```
-app_id=cli_xxxx
-app_secret=xxxx
-```
-
-### 3. 开始使用
-
-配置完成后，直接在 AI IDE 聊天中告诉 AI 助手：
-
-**读取文档**
-> "帮我读一下这个飞书文档 https://xxx.feishu.cn/wiki/TOKEN"
-
-读取支持 `wiki/TOKEN`、`docx/TOKEN`。旧版文档 `docs/doccn...` 暂不支持，请转为新版 `docx` 后再读取。
-
-**写入文档（覆盖更新）**
-> "帮我把这个方案写到 https://xxx.feishu.cn/wiki/TOKEN"
-
-**清空文档**
-> "帮我清空 https://xxx.feishu.cn/wiki/TOKEN"
-
-**在某章节后追加（支持模糊匹配 / 正则）**
-> "在『技术方案』章节末尾追加这段内容"
-
-**删除某个章节后重写**
-> "先删除『技术方案』章节，再把这段新内容写进去"
-
-> ⚠️ 安全保护：
-> - `insert-targeted` 和 `delete-section` 默认都会先展示预览，并要求输入 `yes` 确认后才执行。
-> - 非交互执行时需要显式传 `--yes`。
-
-**首次使用时**，系统会自动检测到未登录并打开浏览器授权页，你只需点击「授权」即可。Token 过期时也会自动重新登录。
-
----
-
-## 支持的格式
-
-- 标题（H1~H9，第一个 H1 自动设为文档标题）
-- 代码块（自动识别 Java、SQL、JSON、Python、Go、Shell、mermaid 等语言）
-- 无序列表、有序列表
-- 待办事项（`- [ ]` / `- [x]`）
-- 引用（渲染为飞书 Callout 容器）
-- 表格（一个 Markdown 表对应一张飞书原生表格，长表通过追加行写入）
-- 分割线
-- 行内样式：**加粗**、`行内代码`、~~删除线~~、[超链接](url)
-
----
-
-## 高级能力（无需记命令）
-
-使用 `snapshot` / `sync` 保存原生块基线、预览差异。获得写入授权后，可以仅更新变化的正文和同结构表格单元格。`write` 仍用于整篇覆盖。命令和恢复步骤见 [差异更新说明](references/diff-sync.md)。
-
-飞书原生 Mermaid 文本绘图可随正文写入。还可以读取内嵌附件，或把 draw.io 源文件导入飞书画板。附件读取和画板导入需要 macOS 或 Linux、Node.js 20+ 和系统 Chrome。首次使用前，在 Skill 根目录执行 `npm ci`。命令和权限说明见 [Skill 指南](SKILL.md)。
-
-下面这些能力，直接在 AI IDE 里用自然语言描述即可：
-
-- 在某个章节后追加内容
-- 在某段文本后插入内容
-- 删除某个章节后重写
-
-示例：
-
-> "在『技术方案』章节末尾追加这段内容"
-
-> "在『数据库设计如下』这段话后面插入这段说明"
-
-> "先删除『技术方案』章节，再把这段新内容写进去"
-
-> ⚠️ 安全保护：涉及定点插入和章节删除时，系统会先给你预览，再确认执行。
-
----
-
-## 常见问题
-
-### 权限不足（forBidden）
-
-检查：
-1. 应用是否已开通所需权限：`docx:document` 和 `docx:document:readonly`
-2. 修改权限后是否重新发布了应用版本
-3. 是否重新运行了 `login.py` 授权
-
-### Token 过期
-
-**会自动重新登录**，无需手动操作。如需手动重新登录或切换账号：
-```bash
-python3 scripts/login.py logout && python3 scripts/login.py
-```
-
-### 表格超过 9 行
-
-`write`、`append` 和 `insert-targeted` 先创建最多 9 行（含表头），再调用 `insert_table_row` 在同一个表格块末尾补齐其余行，最后填充单元格。表格写入失败时会停止，请先回读文档确认已写入的内容再处理。
-
----
-
-## 安全性说明
-
-### App ID + App Secret
-
-- **跟应用绑定，不跟个人绑定**。同一个飞书组织内的成员可以共用同一对 app_id / app_secret。
-- app_id + app_secret 用于启动 OAuth 授权流程，**本身不能直接访问任何文档**。
-- 建议：**不要提交到公开仓库**，通过 `.gitignore` 忽略 `assets/.feishu.local` 文件；`assets/.feishu` 仅作为空模板。
-
-### User Access Token
-
-- 必须由用户本人在浏览器中**点击授权**才能获得，仅凭 app_id + app_secret 无法伪造。
-- 权限范围与你的飞书账号一致：你能编辑的文档才能写，你能查看的文档才能读。
-- 有效期 2 小时，脚本自动刷新。
-
-### Refresh Token
-
-- 用于刷新 access_token，有效期 30 天。
-- ⚠️ **泄露 refresh_token = 身份被冒用**。请妥善保管 `assets/.user_token_cache` 文件，不要分享给他人。
-
-### 凭证风险总结
-
-| 凭证 | 能做什么 | 泄露风险 |
-|------|---------|---------|
-| app_id + app_secret | 启动 OAuth 授权流程，本身不能访问文档 | 低 |
-| user_access_token | 以个人身份读写文档（2h 过期） | 中，但需本人授权才能获取 |
-| refresh_token | 刷新出新的 access_token（30 天有效） | 高，泄露等于身份冒用 |
-
-### 团队共享建议
-
-1. **共享 app_id + app_secret**：团队成员使用同一份 `.feishu` 配置即可
-2. **各自登录**：每人运行 `login.py` 完成个人授权，token 缓存互不影响
-3. **不共享 token 缓存**：`.user_token_cache` 文件仅限本人使用
-
----
-
-## 附录：自建飞书应用
-
-如果不使用作者提供的 App ID，可以自己创建飞书应用：
-
-### 1. 创建应用
-
-1. 打开 [飞书开放平台](https://open.feishu.cn/app)，登录后点击「创建企业自建应用」
-2. 填写应用名称（如 `feishu-doc` 或 `AI IDE Doc`），创建完成后进入应用详情页
-3. 记录 **App ID** 和 **App Secret**
-
-### 2. 开通权限
-
-进入应用详情 → **权限管理** → 搜索并开通以下权限：
-
-| 权限标识 | 说明 | 必须 |
-|---------|------|------|
-| `docx:document` | 查看、编辑和管理云文档 | ✅ |
-| `docx:document:readonly` | 查看云文档 | ✅ |
-
-> **读写权限与你的个人账号一致**：授权登录后，AI 助手使用你的身份访问飞书。你能看到的文档就能读，你能编辑的文档就能写，不需要额外给应用分享文档权限。
-
-### 3. 安全设置
-
-进入应用详情 → **安全设置** → **重定向 URL** → 添加：
-
-```
-http://127.0.0.1:9999/callback
-```
-
-> ⚠️ 必须使用 `127.0.0.1`，不要用 `localhost`，否则会报 20029 错误。
-
-### 4. 发布应用
-
-进入应用详情 → **版本管理与发布** → 创建版本 → 提交发布。
-
-> ⚠️ 每次修改权限后都需要重新发布版本，否则新权限不生效。
-
-### 5. 手动登录（可选）
-
-如需手动触发登录流程，在 skill 根目录执行：
-
-```bash
+cp -n assets/.feishu.example assets/.feishu.local
+# 编辑 assets/.feishu.local，填入 app_id 和 app_secret
 python3 scripts/login.py
 ```
 
-> 💡 OpenCode 常见路径：`~/.opencode/skills/feishu-doc`  
-> 💡 Claude Code 常见路径：`~/.claude/skills/feishu-doc`  
-> 💡 Windsurf 常见路径：`~/.codeium/windsurf/skills/feishu-doc`  
-> 💡 Cursor 常见路径：`~/.cursor/skills/feishu-doc`
+也可以通过运行脚本的环境提供 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`。环境变量优先于本地文件。脚本以登录用户身份访问文档，读取和编辑还取决于应用权限及该用户对目标文档的权限。凭据和登录缓存保存在本机。
 
-**Token 有效期**：
-- **access_token**：2 小时，脚本自动刷新
-- **refresh_token**：30 天，过期后自动重新登录
+### 3. 读取第一篇文档
+
+在助手里提供链接并说明任务，例如“读取这篇飞书文档，整理结论和待办”。也可以直接运行：
+
+```bash
+python3 scripts/index.py read "https://example.feishu.cn/wiki/EXAMPLE_TOKEN"
+```
+
+支持 `/wiki/…` 和 `/docx/…` 链接。将示例替换为有访问权限的实际地址。返回的 JSON 包含标题、Markdown 正文和 `assets` 资源清单。如果命令提示登录完成，重新执行原命令。旧版 `/docs/doccn…` 文档需先转换为新版。
+
+## 更新文档
+
+以下命令在 Skill 根目录执行。写入前确认目标文档和修改范围。
+
+| 目标 | 命令 | 行为 |
+| --- | --- | --- |
+| 在文末补充内容 | `append` | 追加 Markdown，保留已有正文和标题 |
+| 按标题或文字定位 | `insert-targeted` | 预览插入位置，确认后写入 |
+| 更新支持的正文或表格单元格 | `snapshot` / `sync` | 保存基线，先预览差异，再显式应用 |
+| 覆盖整篇正文 | `write` | 清空正文并重新写入，将首个 H1 用作文档标题 |
+| 删除一个章节或清空正文 | `delete-section` / `clear` | 按指定范围删除 |
+
+例如，在「技术方案」章节末尾插入本地 Markdown：
+
+```bash
+python3 scripts/index.py insert-targeted "https://example.feishu.cn/wiki/EXAMPLE_TOKEN" update.md \
+  --anchor-type heading --anchor "技术方案" --match fuzzy --position section_end
+```
+
+写入支持标题、列表、待办、引用、代码块和常用行内样式。每个 Markdown 表格写成一张飞书原生表格，超过 9 行时会在同一张表中追加行。通过 `write`、`append` 或 `insert-targeted` 写入的 `mermaid` 围栏会生成可编辑的飞书文本绘图，读取时可恢复成 Mermaid 源码。
+
+### 预览差异
+
+```bash
+python3 scripts/index.py snapshot "https://example.feishu.cn/wiki/EXAMPLE_TOKEN" baseline.json
+python3 scripts/index.py sync "https://example.feishu.cn/wiki/EXAMPLE_TOKEN" desired.md --baseline baseline.json
+```
+
+`desired.md` 包含完整目标正文，首行为 `# 文档标题`。支持常见正文块及行列结构相同的表格单元格。确认预览后，使用一个尚不存在的状态文件执行：
+
+```bash
+python3 scripts/index.py sync "https://example.feishu.cn/wiki/EXAMPLE_TOKEN" desired.md \
+  --baseline baseline.json --apply --state sync-run.json
+```
+
+文本绘图小组件和表格结构变化的处理方式见[差异更新说明](references/diff-sync.md)。
+
+## 读取附件和导入画板
+
+在 macOS 或 Linux 上准备 Node.js 20+ 和 Google Chrome，然后在 Skill 根目录执行 `npm ci`。首次启动 Chrome 时，按提示登录有对应文档权限的飞书账号。
+
+先运行 `read`，从 `assets` 中找到目标资源的 `blockId`。可保存图片、画板或内嵌表格的可见预览，下载 Excel 附件，或将多维表格当前视图的可见数据导出为 TSV。
+
+```bash
+python3 scripts/index.py read-asset "https://example.feishu.cn/wiki/EXAMPLE_TOKEN" \
+  --block-id "EXAMPLE_BLOCK_ID" --output preview.png
+```
+
+下面的命令预览将 draw.io 文件导入「架构方案」标题后的操作。核对位置后按提示确认。使用 `--replace-block-id` 可以在原画板中替换图形，旧图形会被清除。
+
+```bash
+python3 scripts/index.py import-drawio "https://example.feishu.cn/wiki/EXAMPLE_TOKEN" diagram.drawio \
+  --anchor "架构方案" --output board-preview.png
+```
+
+导入完成后打开截图核对节点、文字和连线。其他参数、适用范围及失败后的回读步骤见 [Skill 指南](SKILL.md)。
+
+## 常见问题
+
+- **提示权限不足**。核对应用权限和版本是否已发布，以及当前飞书账号能否直接访问目标文档。如果只有 `/wiki/…` 链接报错，检查知识库节点的读取权限。
+- **个人授权过期或需要切换账号**。运行 `python3 scripts/login.py logout`，再运行 `python3 scripts/login.py`。附件和画板使用 Chrome 中的独立登录会话。
+- **操作报错后不确定是否已写入**。先回读目标章节或画板，确认已经生效的内容，再处理剩余部分。
